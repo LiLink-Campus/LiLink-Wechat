@@ -16,6 +16,7 @@ lilink-formatter · render.py
 排版约定（让脚本产出更好）见 ../SKILL.md。
 """
 import argparse
+import base64
 import html
 import os
 import re
@@ -63,6 +64,26 @@ RE_STEP_LEAD = re.compile(r"^(第[一二三四五六七八九十0-9]+步|方式[
 # 文件名式 alt（不配题注）
 RE_FILENAME_ALT = re.compile(r"(?i)^\s*$|^image[-_ ]?\d|chatgpt image|\.(png|jpe?g|webp|gif)\s*$")
 
+# 图片扩展名 → MIME（base64 内联用）
+MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
+
+
+def embed_image(src, base_dir):
+    """把本地图片读成 data URI 内联，让复制到公众号时图片随文一起带入。
+    网络图 / 已是 data URI → 原样返回；找不到本地文件 → 保留原 src 并告警。"""
+    s = (src or "").strip()
+    if re.match(r"(?i)^(https?:|data:)", s):
+        return src
+    path = s if os.path.isabs(s) else os.path.normpath(os.path.join(base_dir, s))
+    if not os.path.isfile(path):
+        print(f"⚠ 图片未找到，保留原路径（粘进公众号会缺图）: {src}", file=sys.stderr)
+        return src
+    mime = MIME.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
+    with open(path, "rb") as fh:
+        data = base64.b64encode(fh.read()).decode("ascii")
+    return f"data:{mime};base64,{data}"
+
 
 def esc(text):
     return html.escape(text, quote=False)
@@ -105,7 +126,7 @@ def split_frontmatter(src):
     return title, src
 
 
-def render_blocks(lines, role_map):
+def render_blocks(lines, role_map, base_dir, embed):
     """逐块渲染 Markdown 行 → 内联样式 HTML 片段列表。"""
     out = []
     i, n = 0, len(lines)
@@ -113,7 +134,8 @@ def render_blocks(lines, role_map):
     def img_html(alt, src):
         capped = not RE_FILENAME_ALT.search(alt or "")
         style = STYLE["img_capped"] if capped else STYLE["img"]
-        parts = [f'<img src="{src}" alt="{esc(alt)}" style="{style}">']
+        resolved = embed_image(src, base_dir) if embed else src
+        parts = [f'<img src="{resolved}" alt="{esc(alt)}" style="{style}">']
         if capped:
             parts.append(f'<p style="{STYLE["cap"]}">{esc(alt)}</p>')
         return "".join(parts)
@@ -263,21 +285,19 @@ PAGE = """<!DOCTYPE html>
 
 
 def cta_block(url, text):
-    domain = re.sub(r"^https?://", "", url).rstrip("/")
     return (
         f'<p style="{STYLE["hr"]}">&nbsp;</p>'
-        f'<p style="margin:.4em 0 .6em;text-align:center">'
+        f'<p style="margin:1.2em 0 .2em;text-align:center">'
         f'<a href="{url}" style="display:inline-block;background:{ROSE};color:#fff;text-decoration:none;'
         f'font-size:15px;font-weight:500;padding:11px 28px;border-radius:999px">{esc(text)}</a></p>'
-        f'<p style="margin:.7em 0 0;text-align:center;font-size:12px;color:{CAP};letter-spacing:.04em">{esc(domain)}</p>'
     )
 
 
-def render(src, cta_url, cta_text, no_cta):
+def render(src, cta_url, cta_text, no_cta, base_dir=".", embed=True):
     title, body = split_frontmatter(src)
     lines = body.replace("\r\n", "\n").split("\n")
     role_map = build_role_map(lines)
-    blocks = render_blocks(lines, role_map)
+    blocks = render_blocks(lines, role_map, base_dir, embed)
     if not no_cta:
         blocks.append(cta_block(cta_url, cta_text))
     article = "\n".join("      " + b for b in blocks)
@@ -295,6 +315,8 @@ def main():
     ap.add_argument("--cta-url", default="https://lilink.top", help="文末 CTA 链接（默认 https://lilink.top）")
     ap.add_argument("--cta-text", default="去 LiLink 看看 →", help="文末 CTA 文案")
     ap.add_argument("--no-cta", action="store_true", help="不追加文末 CTA")
+    ap.add_argument("--no-embed-images", action="store_true",
+                    help="不把图片转 base64 内联（默认内联，便于图片随文粘进公众号）")
     args = ap.parse_args()
 
     if not os.path.isfile(args.markdown):
@@ -302,8 +324,10 @@ def main():
     with open(args.markdown, encoding="utf-8") as f:
         src = f.read()
 
+    base_dir = os.path.dirname(os.path.abspath(args.markdown))
     out_path = args.output or os.path.splitext(args.markdown)[0] + ".html"
-    htmlout = render(src, args.cta_url, args.cta_text, args.no_cta)
+    htmlout = render(src, args.cta_url, args.cta_text, args.no_cta,
+                     base_dir=base_dir, embed=not args.no_embed_images)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(htmlout)
     print(f"已生成: {out_path}")

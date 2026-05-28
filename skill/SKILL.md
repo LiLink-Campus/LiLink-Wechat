@@ -5,7 +5,7 @@ description: Render a LiLink / relationship-topic article (Markdown) into a copy
 
 # lilink-formatter
 
-把一篇写好的 relationship / LiLink Markdown，渲染成「微光玫瑰·克制版」的**可复制 HTML**（全元素内联样式，适配公众号粘贴）。
+把一篇写好的 relationship / LiLink Markdown，渲染成「微光玫瑰·克制版」的**可复制 HTML**（全元素内联样式 + 图片 base64 内联，适配公众号粘贴）。
 
 **分工**：这个 skill 只管**排版**（`.md` → 可复制 HTML）。"怎么写"一篇 LiLink 文（温柔第一人称、写孤独与靠近的口吻）是另一件事，归写作风格指引管，不在这里。
 
@@ -24,7 +24,7 @@ python3 scripts/render.py 路径/文章.md
 
 **关键现实**：公众号正文里的外链点不动（这是公众号限制，不是 bug）。所以文末按钮只是**视觉引导**；真正能跳转的 lilink.top，要靠把文章的「**阅读原文**」设成那个链接。生成页顶部的工具条也写了这句提醒。
 
-图片走相对路径，所以 `.html` 要和文章的 `assets/` 在同一目录里打开才显示；粘进公众号后图片需按公众号流程重新上传。
+**图片随文一起进公众号**：脚本默认把每张本地图片读成 base64 `data:` URI 内联进 HTML——所以复制到公众号时，图片会**跟着文字一起粘进去**（公众号编辑器会把内联图自动上传到素材库），不必再一张张手动重传，本地预览也不依赖 `assets/` 目录。代价是 `.html` 体积变大（十几张截图可达数 MB），属正常。网络图（`http(s)://`）保持原样不内联；要关掉内联用 `--no-embed-images`。
 
 ## 这套排版为什么这样（微光玫瑰·克制版）
 
@@ -50,6 +50,7 @@ relationship 要的是**温度**，不是科技感。温暖和护眼应当来自
 | `--cta-url URL` | 文末按钮链接（默认 `https://lilink.top`） |
 | `--cta-text "文案"` | 按钮文案（默认 `去 LiLink 看看 →`） |
 | `--no-cta` | 不加文末按钮（非 LiLink 的 relationship 文可用） |
+| `--no-embed-images` | 不把图片转 base64 内联（默认内联便于随文粘入公众号；想要小体积或全用网络图时关掉） |
 
 `examples/sample.md` 是一篇演示全部约定的样例，`python3 scripts/render.py examples/sample.md` 跑一遍就能看到效果。
 
