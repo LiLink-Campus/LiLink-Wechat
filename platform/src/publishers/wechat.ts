@@ -33,9 +33,10 @@ import type { Publisher, PublishInput, PublishResult } from './types'
 // - 已是微信域名(mmbiz.qpic.cn)的图：跳过（此前已上传过，避免重复）。
 function shouldUpload(src: string): boolean {
   if (!/^https?:\/\//i.test(src)) return false
-  // 严格 host 前缀：只把 mmbiz.qpic.cn 这一精确域名视为"已是微信图"，避免
-  // evil-mmbiz.qpic.cn / evil.com/mmbiz.qpic.cn 这类子串欺骗（codex review High）。
-  if (/^https?:\/\/mmbiz\.qpic\.cn\//i.test(src)) return false
+  // 严格 host 前缀 + 只认 https（与下方 badImg preflight 对齐）：只把 https://mmbiz.qpic.cn/
+  // 视为"已是微信图"，避免 evil-mmbiz.qpic.cn / evil.com/mmbiz.qpic.cn 子串欺骗；
+  // 万一遇 http:// 的旧微信图，这里当外链重新上传换 https（更鲁棒，codex review）。
+  if (/^https:\/\/mmbiz\.qpic\.cn\//i.test(src)) return false
   return true
 }
 
