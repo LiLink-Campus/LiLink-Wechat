@@ -28,6 +28,9 @@ export interface RenderConfig {
 // - config：渲染配置（见 RenderConfig）。
 // - embedImages：是否把本地图片转 base64 内联。缺省视为 true（与 render.py 默认一致）；
 //   显式传 false 时走 --no-embed-images。
+//   ⚠️ 安全：内联模式下 render.py 会按 markdown 里的图片路径读取本地文件。处理用户可控
+//   内容（如渠道稿 bodyMarkdown）时必须显式传 false（发布链路已强制 false），以免读到
+//   服务器本地文件；仅受信场景（CLI 本地排版自己的文章）才用默认内联。
 export interface RenderInput {
   markdown: string
   assets?: Asset[]

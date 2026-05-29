@@ -46,9 +46,42 @@ interface WxAddDraftResponse extends WxBaseResponse {
 }
 
 // 拒绝指向内网/环回/链路本地/保留地址的 host，防 SSRF（图片 URL 可由已认证作者控制）。
-// 第一期挡住直接以 IP/localhost 形态探测内网；合法图片来自公网云对象存储(OSS/COS/R2)。
-const BLOCKED_HOST_RE =
-  /^(localhost|0\.0\.0\.0|127\.|10\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|fe80:|fc|fd)/i
+// 处理 IPv6 字面量方括号、IPv4-mapped IPv6、点分 IPv4 各保留段、通配与纯数字主机名。
+// 合法图片应来自公网云对象存储(OSS/COS/R2 等公网域名)。
+// 注意：不做 DNS 解析，故无法防 DNS 重绑定（域名解析到内网 IP）——第一期可接受，已知限制。
+function isBlockedHost(hostnameRaw: string): boolean {
+  let h = hostnameRaw.toLowerCase().trim()
+  // URL.hostname 对 IPv6 字面量返回带方括号形式（如 [::1]）——剥掉再判。
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1)
+
+  if (h === 'localhost' || h.endsWith('.localhost')) return true
+  // 纯数字主机名（十进制整数 IP，如 2130706433）：非常规，保守拒绝。
+  if (/^\d+$/.test(h)) return true
+
+  // IPv4-mapped IPv6（::ffff:127.0.0.1）→ 取末段 IPv4 继续判；其它 ::ffff: 形式保守拒绝。
+  const mapped = h.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
+  if (mapped) h = mapped[1]
+  else if (h.startsWith('::ffff:')) return true
+
+  // 点分 IPv4：环回/私有/链路本地/CGNAT/通配。
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) {
+    const p = h.split('.').map((n) => Number(n))
+    if (p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true
+    const [a, b] = p
+    if (a === 0 || a === 127 || a === 10) return true
+    if (a === 169 && b === 254) return true
+    if (a === 192 && b === 168) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 100 && b >= 64 && b <= 127) return true
+    return false
+  }
+
+  // IPv6：未指定(::)/环回(::1)/链路本地(fe80::/10)/唯一本地(fc00::/7)。
+  if (h === '::' || h === '::1') return true
+  if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true
+
+  return false
+}
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024 // 10MB 上限，防超大响应耗内存。
 const FETCH_TIMEOUT_MS = 10_000
@@ -59,7 +92,7 @@ async function fetchImageBuffer(rawUrl: string): Promise<{ buf: Buffer; filename
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     throw new Error(`不支持的图片协议：${u.protocol}`)
   }
-  if (BLOCKED_HOST_RE.test(u.hostname)) {
+  if (isBlockedHost(u.hostname)) {
     throw new Error(`拒绝访问内网/环回地址的图片源：${u.hostname}`)
   }
 
@@ -74,6 +107,12 @@ async function fetchImageBuffer(rawUrl: string): Promise<{ buf: Buffer; filename
     const ct = res.headers.get('content-type') ?? ''
     if (!ct.toLowerCase().startsWith('image/')) {
       throw new Error(`图片源 Content-Type 非 image/*：${ct || '(空)'}`)
+    }
+    // 先按声明的 Content-Length 提前拒绝超大响应，避免完整缓冲后才发现耗内存。
+    // 缺失/撒谎时由下面 arrayBuffer 后的 byteLength 兜底。
+    const declaredLen = Number(res.headers.get('content-length') ?? '')
+    if (Number.isFinite(declaredLen) && declaredLen > MAX_IMAGE_BYTES) {
+      throw new Error(`图片过大（Content-Length ${declaredLen} > ${MAX_IMAGE_BYTES}）：${rawUrl}`)
     }
     const ab = await res.arrayBuffer()
     if (ab.byteLength > MAX_IMAGE_BYTES) {

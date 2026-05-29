@@ -133,12 +133,13 @@ export const publishEndpoint = {
     try {
       // 6. 调微信前的轻量并发自检（乐观双检）：
       //    第一期 3 人低并发，不引入新字段 / 不改 ChannelContents / 不用 DB 事务。
-      //    在真正调 publish 前再 findByID 一次，确认 stage 仍不是 draft_created/publishing；
-      //    若已被并发请求抢先建过草稿，则转入幂等路径返回，避免重复建草稿、重复占用素材。
+      //    重新 findByID 取最新快照 fresh，既防并发建草稿，也防首次读(cc)后状态被并发改动。
       //    说明：这只是缩小竞态窗口的最佳努力，**并非原子锁**——两个请求若在本次 findByID
-      //    与下面 publish 之间几乎同时穿过，仍可能双发。完整的原子保护（DB 事务 / 基于
-      //    stage 的条件 CAS 更新）留后续任务，第一期低并发下此双检足够降低重复概率。
+      //    与下面 publish 之间几乎同时穿过，仍可能双发。完整原子保护（DB 事务 / 基于 stage
+      //    的条件 CAS 更新）留后续任务，第一期低并发下此双检足够降低重复概率。
       const fresh = await payload.findByID({ collection: CHANNEL_CONTENTS_SLUG, id })
+
+      // 6a. 已被并发请求建过草稿 → 转幂等路径，绝不重复建。
       if (isDraftTouched(fresh?.publishResult?.stage)) {
         const freshMediaId = fresh?.publishResult?.wxDraftMediaId
         if (fresh?.status !== 'published' && isStatus(fresh?.status) && canTransition(fresh.status, 'published')) {
@@ -147,9 +148,23 @@ export const publishEndpoint = {
         return idempotentResponse(freshMediaId)
       }
 
-      // 7. 真正发布
+      // 6b. 用最新 status 再次校验仍可发布——防首次读(cc)之后状态被并发改成 in_review/draft
+      //     等不可发布态时，仍基于过期的 cc 误建草稿。状态已变则 409、不调微信。
+      const freshStatus = fresh?.status
+      if (!isStatus(freshStatus) || !canTransition(freshStatus, 'published')) {
+        return Response.json(
+          {
+            error: `状态已变更，当前不可发布：${String(freshStatus)}（请刷新后重试）`,
+            from: freshStatus,
+            to: 'published',
+          },
+          { status: 409 },
+        )
+      }
+
+      // 7. 真正发布（用最新快照 fresh，避免基于过期的 cc 发布）。
       const result = await publishers[platform].publish({
-        channelContent: cc,
+        channelContent: fresh,
         wechat: { appId, appSecret },
       })
 
