@@ -12,6 +12,7 @@ import { Posts } from './collections/Posts'
 import { ChannelContents } from './collections/ChannelContents'
 import { publishEndpoint } from './endpoints/publish'
 import { transitionEndpoint } from './endpoints/transition'
+import { inlineHtmlEndpoint } from './endpoints/inlineHtml'
 import { zh } from '@payloadcms/translations/languages/zh'
 
 const filename = fileURLToPath(import.meta.url)
@@ -37,6 +38,7 @@ export default buildConfig({
         ...(Array.isArray(ChannelContents.endpoints) ? ChannelContents.endpoints : []),
         transitionEndpoint,
         publishEndpoint,
+        inlineHtmlEndpoint,
       ],
     },
     Media,

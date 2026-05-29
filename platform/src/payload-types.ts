@@ -241,9 +241,23 @@ export interface ChannelContent {
    */
   wxDigest?: string | null;
   /**
-   * 用 Markdown 写正文，发布时由排版脚本渲染成公众号 HTML。
+   * 可视化编辑，平台自动套微光玫瑰样式
    */
-  bodyMarkdown?: string | null;
+  body?: {
+    root: {
+      type: string;
+      children: {
+        type: any;
+        version: number;
+        [k: string]: unknown;
+      }[];
+      direction: ('ltr' | 'rtl') | null;
+      format: 'left' | 'start' | 'center' | 'right' | 'end' | 'justify' | '';
+      indent: number;
+      version: number;
+    };
+    [k: string]: unknown;
+  } | null;
   /**
    * 从媒体库选一张图作公众号封面（建议用云存储的图，详见 README）。
    */
@@ -401,7 +415,7 @@ export interface ChannelContentsSelect<T extends boolean = true> {
   wxTitle?: T;
   wxAuthor?: T;
   wxDigest?: T;
-  bodyMarkdown?: T;
+  body?: T;
   coverImage?: T;
   sourceUrl?: T;
   renderConfig?:

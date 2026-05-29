@@ -1,19 +1,24 @@
 // WechatPublisher —— 微信公众号发布器。
 //
-// 把一篇渠道稿（Markdown + 封面 + 正文图）真正推到微信草稿箱。链路（与任务约定一致）：
+// 把一篇渠道稿（Lexical 正文 body + 封面 + 正文图）真正推到微信草稿箱。链路（与设计 §4.7 一致）：
 //   ① getAccessToken：取（带进程内缓存的）access_token。
 //   ② 封面：若有 coverImage，addPermanentImage 上传为永久素材，得 thumb_media_id。
-//   ③ 正文图：遍历 bodyMarkdown 里 ![](src) 的每个图片，uploadContentImage 换成微信
-//      域名 URL，并把 Markdown 里对应 src 替换为微信 URL（同一 src 只上传一次）。
-//   ④ 渲染：renderers.wechat.render({ markdown: 替换后, embedImages:false, config })。
-//      embedImages 必须为 false —— 正文图已是微信 URL，不能再被 base64 内联。
+//   ③ 正文图：遍历 Lexical body 里的 upload(image) 节点，取其已 populate 的 doc.url →
+//      uploadContentImage 换成微信域名 URL；用「原图 URL → 微信 URL」映射，同一 URL 只上传一次。
+//   ④ 渲染：renderToInlineHtml(body) 得公众号全内联 HTML（与预览/复制共用同一份）。
+//      然后用 ③ 的映射把 HTML 里 <img src="原url"> 替换成微信 URL —— 因为正文图必须走
+//      mmbiz 域名（design §3.4：外链/base64 会被 draft/add 过滤）。
 //   ⑤ 组装 DraftArticle（content=html, thumb_media_id, title/author/digest/source_url）。
 //   ⑥ addDraft：建草稿，得 media_id。
 //   ⑦ 返回 { draftMediaId, stage:'draft_created' }。
 //
 // 注意：本文件不读 process.env，凭据由 PublishInput.wechat 注入（endpoint 负责从环境变量取）。
+// 历史变更：正文输入从 bodyMarkdown（Markdown）改为 body（Lexical JSON），渲染从
+// renderers.wechat.render 改为直接调 lexical-to-wechat 的 renderToInlineHtml；封面/token/
+// 草稿/幂等/状态流转全部不变（幂等与状态流转在 endpoint 层，本文件本就不涉及）。
 
-import { renderers } from '../renderers'
+import { renderToInlineHtml } from '../renderers/lexical-to-wechat'
+import type { SerializedEditorState } from '@payloadcms/richtext-lexical/lexical'
 import { getAccessToken } from '../wechat/token'
 import {
   addDraft,
@@ -23,29 +28,7 @@ import {
 } from '../wechat/client'
 import type { Publisher, PublishInput, PublishResult } from './types'
 
-// Markdown 图片语法 ![alt](src "可选title") 的匹配。
-// - 捕获组 1：alt 文本；捕获组 2：括号内的整体（src + 可选 title）。
-// 括号内支持 <url>（尖括号形式）或含一层嵌套括号的内容（如 img(1).png），避免遇到
-// URL 里的 ) 提前截断；src 的进一步切分（剥离 title/尖括号）在 extractSrc 里做。
-const MD_IMAGE_RE = /!\[([^\]]*)\]\((<[^>]*>|[^()]*(?:\([^()]*\)[^()]*)*)\)/g
-
-// 从 Markdown 图片括号内容里取出纯 src。
-// 形如 (path "title") / (<path> "title") / (path) 都能正确取到 path。
-function extractSrc(inside: string): string {
-  let s = inside.trim()
-  // 去掉行内 title 部分： src 后跟空白再跟引号包裹的标题。
-  const titleMatch = s.match(/^(\S+)\s+["'(].*$/)
-  if (titleMatch) {
-    s = titleMatch[1]
-  }
-  // 去掉尖括号包裹： <path> → path。
-  if (s.startsWith('<') && s.endsWith('>')) {
-    s = s.slice(1, -1)
-  }
-  return s.trim()
-}
-
-// 判断某个 src 是否需要上传到微信正文图。只上传 http(s) URL（合法图片来自公网云对象存储）：
+// 判断某个 url 是否需要上传到微信正文图。只上传 http(s) URL（合法图片来自公网云对象存储）：
 // - data: 内联图、本地相对/绝对路径：跳过（client 已不再读本地文件，防 LFI）。
 // - 已是微信域名(mmbiz.qpic.cn)的图：跳过（此前已上传过，避免重复）。
 function shouldUpload(src: string): boolean {
@@ -73,6 +56,68 @@ function resolveCoverSource(coverImage: unknown): string | undefined {
   return undefined
 }
 
+// 从一个 Lexical upload 节点里取出图片 doc.url（与 lexical-to-wechat 的 renderUpload 同源：
+// value 必须是已 populate 的文档对象，含 url；非图片(mimeType 非 image/*)不视为正文图）。
+// 取不到 / 非图片返回 undefined。
+function uploadNodeImageUrl(node: Record<string, unknown>): string | undefined {
+  const doc = node.value
+  if (!doc || typeof doc !== 'object') return undefined
+  const d = doc as { url?: string; mimeType?: string }
+  if (typeof d.url !== 'string' || !d.url) return undefined
+  // 非图片资源（如附件）不走正文图上传——renderUpload 会把它降级成文件名链接。
+  if (typeof d.mimeType === 'string' && !d.mimeType.startsWith('image')) return undefined
+  return d.url
+}
+
+// 递归遍历 Lexical 节点树，收集所有 upload(image) 节点的原图 URL（去重、保持首次出现顺序）。
+// 顺序稳定便于测试断言上传次序，也与 renderToInlineHtml 的深度优先遍历一致。
+function collectImageUrls(data: SerializedEditorState | null | undefined): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const root = (data as { root?: { children?: unknown } } | null | undefined)?.root
+  const stackInit = Array.isArray(root?.children) ? (root!.children as unknown[]) : []
+
+  // 显式栈做深度优先（保持 children 自然顺序：先压栈尾、后压栈头以保证出栈即原序）。
+  const walk = (nodes: unknown[]): void => {
+    for (const raw of nodes) {
+      if (!raw || typeof raw !== 'object') continue
+      const node = raw as Record<string, unknown>
+      if (node.type === 'upload') {
+        const url = uploadNodeImageUrl(node)
+        if (url && shouldUpload(url) && !seen.has(url)) {
+          seen.add(url)
+          out.push(url)
+        }
+        // upload 节点无 children，无需下钻。
+        continue
+      }
+      if (Array.isArray(node.children)) {
+        walk(node.children as unknown[])
+      }
+    }
+  }
+  walk(stackInit)
+  return out
+}
+
+// 转义正则元字符，供把任意原图 URL 当字面量构造替换正则用（URL 里常有 . ? & 等元字符）。
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// 把渲染出的 HTML 里所有 <img ... src="原url" ...> 的 src 替换成微信 URL。
+// 只替换 src 属性值本身（双引号包裹——renderUpload 用 escapeAttr 输出双引号属性），
+// 不动 alt 等其它属性；同一原 URL 的多处出现全部替换。
+function replaceImgSrcs(html: string, urlMap: Map<string, string>): string {
+  let out = html
+  for (const [orig, wxUrl] of urlMap) {
+    // 仅匹配 src="原url" 这一精确形态（renderUpload 产出的就是双引号属性），避免误伤。
+    const re = new RegExp(`src="${escapeRegExp(orig)}"`, 'g')
+    out = out.replace(re, `src="${wxUrl}"`)
+  }
+  return out
+}
+
 export class WechatPublisher implements Publisher {
   // 平台标识，供 publishers 注册表检索。
   readonly platform = 'wechat'
@@ -92,43 +137,29 @@ export class WechatPublisher implements Publisher {
       thumbMediaId = mediaId
     }
 
-    // ③ 正文图：遍历 Markdown 所有图片，逐个上传换 URL，并在正文里替换对应 src。
-    //    用 Map 缓存「原 src → 微信 URL」，同一张图重复出现只上传一次。
-    const bodyMarkdown: string = typeof cc?.bodyMarkdown === 'string' ? cc.bodyMarkdown : ''
-    const srcToWxUrl = new Map<string, string>()
-
-    // 先收集去重后的待上传 src（保持首次出现顺序，便于测试断言上传次序）。
-    const pendingSrcs: string[] = []
-    for (const match of bodyMarkdown.matchAll(MD_IMAGE_RE)) {
-      const src = extractSrc(match[2])
-      if (src && shouldUpload(src) && !srcToWxUrl.has(src) && !pendingSrcs.includes(src)) {
-        pendingSrcs.push(src)
-      }
-    }
+    // ③ 正文图：遍历 Lexical body 收集 upload(image) 节点的原图 URL，逐个上传换微信 URL。
+    //    用 Map 缓存「原图 URL → 微信 URL」，同一张图重复出现只上传一次。
+    const body = (cc?.body ?? null) as SerializedEditorState | null
+    const imageUrls = collectImageUrls(body)
+    const urlMap = new Map<string, string>()
     // 顺序上传（而非并发）：微信上传接口有频率限制，顺序更稳；规模小不必并发。
-    for (const src of pendingSrcs) {
+    for (const src of imageUrls) {
       const { url } = await uploadContentImage(token, src)
-      srcToWxUrl.set(src, url)
+      urlMap.set(src, url)
     }
 
-    // 在 Markdown 里把每个原 src 替换成微信 URL。重新跑一遍正则做替换，
-    // 只替换括号内的 src 部分，保留 alt / title 原样。
-    const replacedMarkdown = srcToWxUrl.size
-      ? bodyMarkdown.replace(MD_IMAGE_RE, (whole, alt: string, inside: string) => {
-          const src = extractSrc(inside)
-          const wxUrl = srcToWxUrl.get(src)
-          if (!wxUrl) return whole
-          // 用微信 URL 重建为最简单的 ![alt](wxUrl) 形态（title 在公众号正文中无意义）。
-          return `![${alt}](${wxUrl})`
-        })
-      : bodyMarkdown
-
-    // ④ 渲染成微信 HTML。embedImages 强制 false：正文图已是微信 URL，禁止再内联。
-    const { html } = await renderers.wechat.render({
-      markdown: replacedMarkdown,
-      embedImages: false,
-      config: cc?.renderConfig,
+    // ④ 渲染成公众号全内联 HTML（与预览/复制共用同一份产物）。renderToInlineHtml 按
+    //    upload 节点已 populate 的 doc.url 原样输出图片 src；随后用 ③ 的映射把这些原 URL
+    //    替换成微信 mmbiz URL（design §3.4：正文图必须走微信域名，外链/base64 会被过滤）。
+    const renderConfig = (cc?.renderConfig ?? undefined) as
+      | { ctaUrl?: string; ctaText?: string; noCta?: boolean }
+      | undefined
+    const rawHtml = renderToInlineHtml(body, {
+      ctaUrl: renderConfig?.ctaUrl,
+      ctaText: renderConfig?.ctaText,
+      noCta: renderConfig?.noCta,
     })
+    const html = urlMap.size ? replaceImgSrcs(rawHtml, urlMap) : rawHtml
 
     // ⑤ 组装单篇草稿。title 兜底空串避免 undefined 进 JSON；author/digest/source_url
     //    为可选字段，缺省不传（微信会自行处理摘要/署名）。

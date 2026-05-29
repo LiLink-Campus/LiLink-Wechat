@@ -1,4 +1,18 @@
 import type { CollectionConfig } from 'payload'
+import {
+  lexicalEditor,
+  HeadingFeature,
+  BoldFeature,
+  ItalicFeature,
+  UnorderedListFeature,
+  OrderedListFeature,
+  BlockquoteFeature,
+  LinkFeature,
+  UploadFeature,
+  FixedToolbarFeature,
+  InlineToolbarFeature,
+  ParagraphFeature,
+} from '@payloadcms/richtext-lexical'
 
 // 渠道稿（ChannelContent）：一个选题在某个平台上的具体可发布内容 + 流转状态。
 // 第一期重点是公众号（wechat），公众号专属字段通过 admin.condition 仅在 platform==='wechat' 时显示。
@@ -13,6 +27,9 @@ export const ChannelContents: CollectionConfig = {
       '选题在某平台的具体稿件 + 发布状态。第一期做公众号：写正文、选封面、排版预览，走「草稿→待审核→已批准→已发布」。',
     useAsTitle: 'wxTitle',
     defaultColumns: ['post', 'platform', 'status', 'assignee', 'updatedAt'],
+    // 一键预览：开新标签到预览页（取 body→渲染成「与发布完全相同」的公众号内联 HTML）。
+    // 签名为 (doc, { req }) => string | null；doc 含本条 id。
+    preview: (doc) => `/preview/channel-contents/${doc?.id}`,
   },
   fields: [
     {
@@ -66,12 +83,41 @@ export const ChannelContents: CollectionConfig = {
       },
     },
     {
-      name: 'bodyMarkdown',
-      label: '正文（Markdown）',
-      type: 'textarea',
+      name: 'body',
+      label: '正文',
+      type: 'richText',
       admin: {
         condition: (data) => data?.platform === 'wechat',
-        description: '用 Markdown 写正文，发布时由排版脚本渲染成公众号 HTML。',
+        description: '可视化编辑，平台自动套微光玫瑰样式',
+      },
+      // 公众号正文编辑器：所见即所得。启用标题(H2/H3/H4)、加粗、斜体、有序/无序列表、
+      // 引用、链接、上传图片（指向 media 集合）、段落，以及固定/浮动工具条。
+      // 发布时由转换层把这份 Lexical JSON 渲染成全内联的公众号 HTML（见设计文档 §4.4）。
+      editor: lexicalEditor({
+        features: () => [
+          ParagraphFeature(),
+          HeadingFeature({ enabledHeadingSizes: ['h2', 'h3', 'h4'] }),
+          BoldFeature(),
+          ItalicFeature(),
+          UnorderedListFeature(),
+          OrderedListFeature(),
+          BlockquoteFeature(),
+          LinkFeature(),
+          UploadFeature({ enabledCollections: ['media'] }),
+          FixedToolbarFeature(),
+          InlineToolbarFeature(),
+        ],
+      }),
+    },
+    {
+      // 「复制到公众号」按钮：取与发布同一份内联 HTML，写入双格式剪贴板，
+      // 运营粘进公众号编辑器即可，不掉格式（设计 §3.5 通道二）。
+      name: 'copyToWechat',
+      type: 'ui',
+      admin: {
+        condition: (data) => data?.platform === 'wechat',
+        disableListColumn: true,
+        components: { Field: '/components/CopyToWechat#CopyToWechat' },
       },
     },
     {

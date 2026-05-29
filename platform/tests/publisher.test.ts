@@ -10,29 +10,46 @@ vi.mock('../src/wechat/token', () => ({
 // mock 微信 client：三个上传/草稿函数都返回可预期的假值，便于断言链路与替换。
 vi.mock('../src/wechat/client', () => ({
   addPermanentImage: vi.fn(async () => ({ mediaId: 'THUMB_MID', url: 'https://mmbiz.qpic.cn/cover.jpg' })),
-  // 正文图：按入参 src 返回一个可区分的微信 URL，便于断言"哪张图换成了哪个 URL"。
+  // 正文图：按入参（原图 URL）返回一个可区分的微信 URL，便于断言"哪张图换成了哪个 URL"。
   uploadContentImage: vi.fn(async (_token: string, file: unknown) => ({
     url: `https://mmbiz.qpic.cn/uploaded/${encodeURIComponent(String(file))}.jpg`,
   })),
   addDraft: vi.fn(async () => ({ mediaId: 'DRAFT_MID' })),
 }))
 
-// mock 渲染器注册表：renderers.wechat.render 记录入参并回固定 HTML。
+// mock lexical-to-wechat 的 renderToInlineHtml：
 // 用 vi.hoisted 定义 renderMock —— vi.mock 工厂被提升到文件顶端，普通 top-level 变量
 // 在工厂运行时尚未初始化（报 Cannot access before initialization）；hoisted 块同被提升故可用。
+// 行为：遍历传入 Lexical body 的 upload 节点，按 doc.url 产出 <img src="原url" /> —— 这样
+// 发布器随后用「原url→微信url」映射做 HTML src 替换的逻辑才能被真实验证。
 const { renderMock } = vi.hoisted(() => ({
-  // 声明入参类型，使 renderMock.mock.calls[0][0] 有类型（否则严格模式下空元组索引报错）。
   renderMock: vi.fn(
-    async (_input: { markdown: string; embedImages?: boolean; config?: unknown }) => ({
-      html: '<p>rendered</p>',
-      warnings: [] as string[],
-    }),
+    (
+      data: unknown,
+      _opts?: { ctaUrl?: string; ctaText?: string; noCta?: boolean },
+    ): string => {
+      const imgs: string[] = []
+      const root = (data as { root?: { children?: unknown } } | null | undefined)?.root
+      const walk = (nodes: unknown): void => {
+        if (!Array.isArray(nodes)) return
+        for (const raw of nodes) {
+          if (!raw || typeof raw !== 'object') continue
+          const node = raw as Record<string, unknown>
+          if (node.type === 'upload') {
+            const doc = node.value as { url?: string } | undefined
+            if (doc?.url) imgs.push(`<img src="${doc.url}" alt="" />`)
+            continue
+          }
+          if (Array.isArray(node.children)) walk(node.children)
+        }
+      }
+      walk(root?.children)
+      return `<section><p>rendered</p>${imgs.join('')}</section>`
+    },
   ),
 }))
-vi.mock('../src/renderers', () => ({
-  renderers: {
-    wechat: { platform: 'wechat', render: renderMock },
-  },
+vi.mock('../src/renderers/lexical-to-wechat', () => ({
+  renderToInlineHtml: renderMock,
 }))
 
 // mock 之后再 import 被测对象与（被 mock 的）依赖，拿到的是 mock 实例。
@@ -50,7 +67,88 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 
-// 一份典型渠道稿：含封面 + 正文两张图（其中一张重复出现，用于验去重只传一次）。
+// 文本叶子节点工厂。
+const text = (t: string) => ({
+  type: 'text',
+  text: t,
+  format: 0,
+  detail: 0,
+  mode: 'normal',
+  style: '',
+  version: 1,
+})
+
+// 上传图片节点工厂（value 为已 populate 的 media 文档，含 url）。
+const uploadImage = (url: string, alt = '配图') => ({
+  type: 'upload',
+  relationTo: 'media',
+  version: 1,
+  format: '',
+  fields: { alt },
+  value: {
+    id: url,
+    url,
+    alt,
+    width: 900,
+    height: 600,
+    mimeType: 'image/png',
+    filename: 'x.png',
+  },
+})
+
+// 构造一份典型 Lexical 正文 body：含两张不同正文图，其中图一重复出现一次（验去重只传一次），
+// 并夹一个非图片(附件)的 upload 节点（验只上传 image/* 正文图）。
+function makeBody() {
+  return {
+    root: {
+      type: 'root',
+      direction: 'ltr',
+      format: '',
+      indent: 0,
+      version: 1,
+      children: [
+        { type: 'paragraph', direction: 'ltr', format: '', indent: 0, version: 1, children: [text('开头')] },
+        uploadImage('https://cdn.local/pic1.png', '图一'),
+        { type: 'paragraph', direction: 'ltr', format: '', indent: 0, version: 1, children: [text('中间')] },
+        uploadImage('https://ex.com/pic2.png', '图二'),
+        // 非图片资源：不应被上传为正文图。
+        {
+          type: 'upload',
+          relationTo: 'media',
+          version: 1,
+          format: '',
+          fields: {},
+          value: { id: 'f1', url: 'https://cdn.local/doc.pdf', mimeType: 'application/pdf', filename: 'doc.pdf' },
+        },
+        // 图一再次出现（嵌在 list/listitem 内，验证递归遍历也能命中、且去重）。
+        {
+          type: 'list',
+          tag: 'ul',
+          listType: 'bullet',
+          start: 1,
+          direction: 'ltr',
+          format: '',
+          indent: 0,
+          version: 1,
+          children: [
+            {
+              type: 'listitem',
+              value: 1,
+              direction: 'ltr',
+              format: '',
+              indent: 0,
+              version: 1,
+              children: [uploadImage('https://cdn.local/pic1.png', '又是图一')],
+            },
+          ],
+        },
+        { type: 'paragraph', direction: 'ltr', format: '', indent: 0, version: 1, children: [text('结尾')] },
+      ],
+    },
+  }
+}
+
+// 一份典型渠道稿：含封面 + Lexical 正文 body。
 function makeChannelContent(overrides: Record<string, unknown> = {}) {
   return {
     id: 'cc1',
@@ -61,7 +159,7 @@ function makeChannelContent(overrides: Record<string, unknown> = {}) {
     wxDigest: '摘要',
     sourceUrl: 'https://lilink.top',
     coverImage: { id: 'm1', url: 'https://cdn.local/cover.png' },
-    bodyMarkdown: '开头\n\n![图一](https://cdn.local/pic1.png)\n\n中间\n\n![图二](https://ex.com/pic2.png)\n\n再次出现图一 ![又是图一](https://cdn.local/pic1.png)\n\n结尾',
+    body: makeBody(),
     renderConfig: { ctaUrl: 'https://lilink.top', noCta: false },
     ...overrides,
   }
@@ -85,7 +183,7 @@ describe('WechatPublisher.publish 链路', () => {
     expect(addPermanentImage).toHaveBeenCalledTimes(1)
     expect(addPermanentImage).toHaveBeenCalledWith('TKN', 'https://cdn.local/cover.png')
 
-    // 正文图：两张不同图各传一次（pic1.png 重复出现只上传一次）。
+    // 正文图：两张不同图各传一次（pic1.png 重复出现只上传一次；pdf 非图片不传）。
     expect(uploadContentImage).toHaveBeenCalledTimes(2)
     const uploadedSrcs = (uploadContentImage as any).mock.calls.map((c: unknown[]) => c[1])
     expect(uploadedSrcs).toEqual(['https://cdn.local/pic1.png', 'https://ex.com/pic2.png'])
@@ -106,35 +204,31 @@ describe('WechatPublisher.publish 链路', () => {
     expect(renderOrder).toBeLessThan(draftOrder)
   })
 
-  it('把正文 Markdown 里的图片 src 替换成微信 URL，再以 embedImages:false 渲染', async () => {
+  it('以 Lexical body 调 renderToInlineHtml（透传 renderConfig），再把 HTML 里图片 src 换成微信 URL', async () => {
     const cc = makeChannelContent()
     await new WechatPublisher().publish({
       channelContent: cc,
       wechat: { appId: 'APPID', appSecret: 'SECRET' },
     })
 
-    // 渲染只被调一次，且 embedImages 必须为 false（正文图已是微信 URL，禁止再内联）。
+    // 渲染只被调一次，且第一参是 Lexical body 本身。
     expect(renderMock).toHaveBeenCalledTimes(1)
-    const renderArg = renderMock.mock.calls[0][0] as {
-      markdown: string
-      embedImages?: boolean
-      config?: unknown
-    }
-    expect(renderArg.embedImages).toBe(false)
-    // renderConfig 透传。
-    expect(renderArg.config).toEqual(cc.renderConfig)
+    const [bodyArg, optsArg] = renderMock.mock.calls[0]
+    expect(bodyArg).toBe(cc.body)
+    // renderConfig 经摊平透传（ctaUrl / noCta）。
+    expect(optsArg).toMatchObject({ ctaUrl: 'https://lilink.top', noCta: false })
 
-    // 替换后的 Markdown：原 src 不再出现，替换为 uploadContentImage 返回的微信 URL。
-    const md = renderArg.markdown
+    // 建草稿用的 content：原图 src 全部替换成微信 URL，且原 URL 不再出现。
+    const article = (addDraft as any).mock.calls[0][1]
     const wxUrl1 = `https://mmbiz.qpic.cn/uploaded/${encodeURIComponent('https://cdn.local/pic1.png')}.jpg`
     const wxUrl2 = `https://mmbiz.qpic.cn/uploaded/${encodeURIComponent('https://ex.com/pic2.png')}.jpg`
-    expect(md).toContain(wxUrl1)
-    expect(md).toContain(wxUrl2)
-    // 原始图片 src 已被替换掉（不再以 ](原url) 形式出现）。
-    expect(md).not.toContain('](https://cdn.local/pic1.png)')
-    expect(md).not.toContain('](https://ex.com/pic2.png)')
-    // 重复出现的图一两处都替换成同一个微信 URL。
-    const occurrences = md.split(wxUrl1).length - 1
+    expect(article.content).toContain(`src="${wxUrl1}"`)
+    expect(article.content).toContain(`src="${wxUrl2}"`)
+    expect(article.content).not.toContain('src="https://cdn.local/pic1.png"')
+    expect(article.content).not.toContain('src="https://ex.com/pic2.png"')
+    // 重复出现的图一两处都替换成同一个微信 URL（mock 为每个 upload 节点各产一个 img，
+    // 图一出现两次 → 两个 img → 都换成 wxUrl1）。
+    const occurrences = article.content.split(`src="${wxUrl1}"`).length - 1
     expect(occurrences).toBe(2)
   })
 
@@ -152,10 +246,11 @@ describe('WechatPublisher.publish 链路', () => {
       title: '标题',
       author: '李林',
       digest: '摘要',
-      content: '<p>rendered</p>',
       thumb_media_id: 'THUMB_MID',
       content_source_url: 'https://lilink.top',
     })
+    // content 是渲染产物（含 rendered 标记 + 替换后的图片）。
+    expect(article.content).toContain('rendered')
   })
 
   it('无封面图时跳过 addPermanentImage，thumb_media_id 为空串', async () => {
@@ -179,15 +274,40 @@ describe('WechatPublisher.publish 链路', () => {
     expect(addPermanentImage).toHaveBeenCalledWith('TKN', 'https://cdn.local/x.png')
   })
 
-  it('正文无图片时不调 uploadContentImage，直接渲染原文', async () => {
-    const cc = makeChannelContent({ bodyMarkdown: '只有文字，没有图片。' })
+  it('正文无图片时不调 uploadContentImage，直接以 body 渲染', async () => {
+    const emptyBody = {
+      root: {
+        type: 'root',
+        direction: 'ltr',
+        format: '',
+        indent: 0,
+        version: 1,
+        children: [
+          { type: 'paragraph', direction: 'ltr', format: '', indent: 0, version: 1, children: [text('只有文字，没有图片。')] },
+        ],
+      },
+    }
+    const cc = makeChannelContent({ body: emptyBody })
     await new WechatPublisher().publish({
       channelContent: cc,
       wechat: { appId: 'APPID', appSecret: 'SECRET' },
     })
     expect(uploadContentImage).not.toHaveBeenCalled()
-    const renderArg = renderMock.mock.calls[0][0] as { markdown: string }
-    expect(renderArg.markdown).toBe('只有文字，没有图片。')
+    // 仍以该 body 调了渲染。
+    expect(renderMock).toHaveBeenCalledTimes(1)
+    expect(renderMock.mock.calls[0][0]).toBe(emptyBody)
+  })
+
+  it('body 为空 / 缺失时不崩，按空 body 渲染、不传图', async () => {
+    const cc = makeChannelContent({ body: null })
+    const result = await new WechatPublisher().publish({
+      channelContent: cc,
+      wechat: { appId: 'APPID', appSecret: 'SECRET' },
+    })
+    expect(result.stage).toBe('draft_created')
+    expect(uploadContentImage).not.toHaveBeenCalled()
+    expect(renderMock).toHaveBeenCalledTimes(1)
+    expect(renderMock.mock.calls[0][0]).toBeNull()
   })
 
   it('publishers 注册表暴露 wechat 实例', () => {

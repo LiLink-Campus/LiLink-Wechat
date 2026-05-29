@@ -8,7 +8,9 @@
 // 一次发布的输入。
 // - channelContent：完整的渠道稿文档（channel-contents 一条记录）。用 any 是因为
 //   Payload 生成的类型在跨任务阶段未必稳定，发布器只读取其中已知字段：
-//   wxTitle / wxAuthor / wxDigest / bodyMarkdown / coverImage / sourceUrl / renderConfig。
+//   wxTitle / wxAuthor / wxDigest / body(Lexical 正文，含 upload 图片节点) /
+//   coverImage / sourceUrl / renderConfig。
+//   （正文从早期的 bodyMarkdown 升级为 body(Lexical JSON)，见 design §4.2/§4.7。）
 // - wechat：微信凭据（公众号 AppID / AppSecret）。由 endpoint 从环境变量注入，
 //   不直接依赖 process.env，便于测试与多公众号扩展。
 export interface PublishInput {
