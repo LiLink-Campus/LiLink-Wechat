@@ -76,9 +76,19 @@ function isBlockedHost(hostnameRaw: string): boolean {
     return false
   }
 
-  // IPv6：未指定(::)/环回(::1)/链路本地(fe80::/10)/唯一本地(fc00::/7)。
-  if (h === '::' || h === '::1') return true
-  if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true
+  // IPv6 字面量（含冒号）才判 IPv6 规则——避免把 fcdn.com / fd-xx.com 等合法域名误判。
+  if (h.includes(':')) {
+    if (h === '::' || h === '::1') return true
+    const first = h.split(':')[0] // '' 表示以 :: 开头（前导零段省略），交后续按公网放行
+    if (first) {
+      const v = parseInt(first, 16)
+      if (Number.isFinite(v)) {
+        if ((v & 0xffc0) === 0xfe80) return true // fe80::/10 链路本地（覆盖 fe80–febf）
+        if ((v & 0xfe00) === 0xfc00) return true // fc00::/7 唯一本地（覆盖 fc00–fdff）
+      }
+    }
+    return false
+  }
 
   return false
 }
@@ -148,7 +158,7 @@ async function toBlobPart(file: WxFileInput): Promise<{ blob: Blob; filename: st
  * 上传图文消息内的图片（正文图）。
  * 不占用永久素材额度，仅返回可内嵌正文的微信域名 URL。
  * @param token access_token
- * @param file Buffer / 本地路径 / 图片 URL
+ * @param file Buffer 或 http(s) 图片 URL（不再支持本地路径）
  */
 export async function uploadContentImage(token: string, file: WxFileInput): Promise<{ url: string }> {
   const { blob, filename } = await toBlobPart(file)
@@ -175,7 +185,7 @@ export async function uploadContentImage(token: string, file: WxFileInput): Prom
  * 上传永久图片素材（用作封面图）。
  * 占用永久素材额度，返回 media_id（建草稿时填 thumb_media_id）和预览 url。
  * @param token access_token
- * @param file Buffer / 本地路径 / 图片 URL
+ * @param file Buffer 或 http(s) 图片 URL（不再支持本地路径）
  */
 export async function addPermanentImage(
   token: string,

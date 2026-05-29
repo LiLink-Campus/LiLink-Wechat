@@ -162,6 +162,14 @@ export const publishEndpoint = {
         )
       }
 
+      // 6c. 平台也以最新快照为准（两次读之间理论上可能被改），且须与首次校验过的 platform 一致。
+      if (!isSupportedPlatform(fresh?.platform) || fresh.platform !== platform) {
+        return Response.json(
+          { error: `发布平台已变更或不受支持：${String(fresh?.platform)}` },
+          { status: 409 },
+        )
+      }
+
       // 7. 真正发布（用最新快照 fresh，避免基于过期的 cc 发布）。
       const result = await publishers[platform].publish({
         channelContent: fresh,

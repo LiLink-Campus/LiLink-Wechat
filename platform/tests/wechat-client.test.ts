@@ -153,6 +153,44 @@ describe('uploadContentImage', () => {
     // 第二次 fetch 的是微信上传端点。
     expect(String((fetchMock.mock.calls[1] as unknown[])[0])).toContain('media/uploadimg')
   })
+
+  it('SSRF 防护：拒绝内网/环回/保留地址的图片源，且不发起任何请求', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const blocked = [
+      'http://127.0.0.1/a.png',
+      'http://10.0.0.5/a.png',
+      'http://192.168.1.1/a.png',
+      'http://169.254.169.254/latest/meta-data', // 云元数据端点
+      'http://localhost/a.png',
+      'http://2130706433/a.png', // 十进制整数 IP
+      'http://[::1]/a.png',
+      'http://[fe90::1]/a.png', // fe80::/10 整段（不止 fe80::）
+      'http://[fd12::1]/a.png', // fc00::/7 唯一本地
+      'http://[::ffff:127.0.0.1]/a.png', // IPv4-mapped IPv6
+    ]
+    for (const url of blocked) {
+      await expect(uploadContentImage('TKN', url)).rejects.toThrow(/内网|环回|拒绝/)
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('放行合法公网域名（fc/fd 开头域名如 fcdn.* 不被 IPv6 规则误拦）', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'image/png' }),
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      } as unknown as Response)
+      .mockResolvedValueOnce(jsonResponse({ url: 'https://mmbiz.qpic.cn/z.jpg' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await uploadContentImage('TKN', 'https://fcdn.example.com/pic.png')
+    expect(result.url).toBe('https://mmbiz.qpic.cn/z.jpg')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('addPermanentImage', () => {
