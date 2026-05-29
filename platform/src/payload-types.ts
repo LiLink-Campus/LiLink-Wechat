@@ -68,6 +68,9 @@ export interface Config {
   blocks: {};
   collections: {
     users: User;
+    media: Media;
+    posts: Post;
+    'channel-contents': ChannelContent;
     'payload-kv': PayloadKv;
     'payload-locked-documents': PayloadLockedDocument;
     'payload-preferences': PayloadPreference;
@@ -76,6 +79,9 @@ export interface Config {
   collectionsJoins: {};
   collectionsSelect: {
     users: UsersSelect<false> | UsersSelect<true>;
+    media: MediaSelect<false> | MediaSelect<true>;
+    posts: PostsSelect<false> | PostsSelect<true>;
+    'channel-contents': ChannelContentsSelect<false> | ChannelContentsSelect<true>;
     'payload-kv': PayloadKvSelect<false> | PayloadKvSelect<true>;
     'payload-locked-documents': PayloadLockedDocumentsSelect<false> | PayloadLockedDocumentsSelect<true>;
     'payload-preferences': PayloadPreferencesSelect<false> | PayloadPreferencesSelect<true>;
@@ -144,6 +150,89 @@ export interface User {
 }
 /**
  * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "media".
+ */
+export interface Media {
+  id: number;
+  type: 'image' | 'audio' | 'video';
+  alt?: string | null;
+  caption?: string | null;
+  credit?: string | null;
+  duration?: number | null;
+  updatedAt: string;
+  createdAt: string;
+  url?: string | null;
+  thumbnailURL?: string | null;
+  filename?: string | null;
+  mimeType?: string | null;
+  filesize?: number | null;
+  width?: number | null;
+  height?: number | null;
+  focalX?: number | null;
+  focalY?: number | null;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "posts".
+ */
+export interface Post {
+  id: number;
+  title: string;
+  topic?: string | null;
+  tags?:
+    | {
+        tag?: string | null;
+        id?: string | null;
+      }[]
+    | null;
+  owner?: (number | null) | User;
+  sharedAssets?: (number | Media)[] | null;
+  notes?: string | null;
+  updatedAt: string;
+  createdAt: string;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "channel-contents".
+ */
+export interface ChannelContent {
+  id: number;
+  post: number | Post;
+  platform: 'wechat' | 'xiaohongshu' | 'x' | 'douyin' | 'bilibili';
+  wxTitle?: string | null;
+  wxAuthor?: string | null;
+  wxDigest?: string | null;
+  bodyMarkdown?: string | null;
+  coverImage?: (number | null) | Media;
+  sourceUrl?: string | null;
+  renderConfig?: {
+    ctaUrl?: string | null;
+    ctaText?: string | null;
+    noCta?: boolean | null;
+  };
+  status?: ('draft' | 'in_review' | 'approved' | 'published') | null;
+  assignee?: (number | null) | User;
+  renderedHtmlPreview?: string | null;
+  publishResult?: {
+    wxDraftMediaId?: string | null;
+    publishedAt?: string | null;
+    lastError?: string | null;
+    stage?: ('none' | 'draft_created' | 'mass_sent') | null;
+  };
+  transitionLog?:
+    | {
+        [k: string]: unknown;
+      }
+    | unknown[]
+    | string
+    | number
+    | boolean
+    | null;
+  updatedAt: string;
+  createdAt: string;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
  * via the `definition` "payload-kv".
  */
 export interface PayloadKv {
@@ -165,10 +254,23 @@ export interface PayloadKv {
  */
 export interface PayloadLockedDocument {
   id: number;
-  document?: {
-    relationTo: 'users';
-    value: number | User;
-  } | null;
+  document?:
+    | ({
+        relationTo: 'users';
+        value: number | User;
+      } | null)
+    | ({
+        relationTo: 'media';
+        value: number | Media;
+      } | null)
+    | ({
+        relationTo: 'posts';
+        value: number | Post;
+      } | null)
+    | ({
+        relationTo: 'channel-contents';
+        value: number | ChannelContent;
+      } | null);
   globalSlug?: string | null;
   user: {
     relationTo: 'users';
@@ -234,6 +336,82 @@ export interface UsersSelect<T extends boolean = true> {
         createdAt?: T;
         expiresAt?: T;
       };
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "media_select".
+ */
+export interface MediaSelect<T extends boolean = true> {
+  type?: T;
+  alt?: T;
+  caption?: T;
+  credit?: T;
+  duration?: T;
+  updatedAt?: T;
+  createdAt?: T;
+  url?: T;
+  thumbnailURL?: T;
+  filename?: T;
+  mimeType?: T;
+  filesize?: T;
+  width?: T;
+  height?: T;
+  focalX?: T;
+  focalY?: T;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "posts_select".
+ */
+export interface PostsSelect<T extends boolean = true> {
+  title?: T;
+  topic?: T;
+  tags?:
+    | T
+    | {
+        tag?: T;
+        id?: T;
+      };
+  owner?: T;
+  sharedAssets?: T;
+  notes?: T;
+  updatedAt?: T;
+  createdAt?: T;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "channel-contents_select".
+ */
+export interface ChannelContentsSelect<T extends boolean = true> {
+  post?: T;
+  platform?: T;
+  wxTitle?: T;
+  wxAuthor?: T;
+  wxDigest?: T;
+  bodyMarkdown?: T;
+  coverImage?: T;
+  sourceUrl?: T;
+  renderConfig?:
+    | T
+    | {
+        ctaUrl?: T;
+        ctaText?: T;
+        noCta?: T;
+      };
+  status?: T;
+  assignee?: T;
+  renderedHtmlPreview?: T;
+  publishResult?:
+    | T
+    | {
+        wxDraftMediaId?: T;
+        publishedAt?: T;
+        lastError?: T;
+        stage?: T;
+      };
+  transitionLog?: T;
+  updatedAt?: T;
+  createdAt?: T;
 }
 /**
  * This interface was referenced by `Config`'s JSON-Schema

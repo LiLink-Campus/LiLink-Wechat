@@ -1,0 +1,61 @@
+# LiLink 平台一体化编排：app(Next.js+Payload) + postgres
+#
+# 用法（在 platform/docker 目录下）：
+#   docker compose up -d --build
+#
+# 说明：
+# - build.context 指向上一级 platform/，dockerfile 用 docker/Dockerfile；
+#   这样 Dockerfile 里的 COPY 以 platform/ 为根（能拿到 package.json、src/、scripts/ 等）。
+# - 机密（PAYLOAD_SECRET / WX_* 等）从 ../.env（即 platform/.env）经 env_file 注入。
+# - 容器内 DATABASE_URI 必须走 compose 内网服务名 postgres:5432，
+#   而非 .env 里那条本地开发用的 localhost:5433；故在 environment 显式覆盖
+#   （environment 优先级高于 env_file），让容器内连对地址。
+
+services:
+  app:
+    build:
+      context: ..              # = platform/
+      dockerfile: docker/Dockerfile
+    image: lilink-platform:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - ../.env                # 加载 PAYLOAD_SECRET、WX_* 等机密（platform/.env）
+    environment:
+      NODE_ENV: production
+      # 覆盖 .env 中的本地开发地址：容器内连 compose 内网的 postgres 服务
+      DATABASE_URI: postgres://lilink:lilink@postgres:5432/lilink
+    depends_on:
+      postgres:
+        condition: service_healthy   # 等数据库就绪再启动 app
+    networks:
+      - lilink
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lilink
+      POSTGRES_PASSWORD: lilink
+      POSTGRES_DB: lilink
+    # 仅映射到宿主 5434，避免与本机已有的 5432/5433 PostgreSQL 冲突；
+    # app 容器是走内网 postgres:5432，不依赖这个宿主端口。
+    ports:
+      - "5434:5432"
+    volumes:
+      - lilink_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lilink -d lilink"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - lilink
+
+volumes:
+  lilink_pgdata:                # 数据持久化卷
+
+networks:
+  lilink:
+    driver: bridge
