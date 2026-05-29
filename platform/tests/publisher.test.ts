@@ -325,6 +325,18 @@ describe('WechatPublisher.publish 链路', () => {
     expect(addDraft).not.toHaveBeenCalled()
   })
 
+  it('微信 uploadimg 返回 http://mmbiz（非 https）也放行，不被 preflight 误拦', async () => {
+    // 真机实测：微信 uploadimg 返回的正文图 URL 是 http://mmbiz.qpic.cn/...（非 https）。
+    ;(uploadContentImage as any).mockResolvedValueOnce({ url: 'http://mmbiz.qpic.cn/abc/0?from=appmsg' })
+    const cc = makeChannelContent()
+    const result = await new WechatPublisher().publish({
+      channelContent: cc,
+      wechat: { appId: 'A', appSecret: 'S' },
+    })
+    expect(result.stage).toBe('draft_created')
+    expect(addDraft).toHaveBeenCalledTimes(1)
+  })
+
   it('publishers 注册表暴露 wechat 实例', () => {
     expect(publishers.wechat).toBeInstanceOf(WechatPublisher)
     expect(publishers.wechat.platform).toBe('wechat')

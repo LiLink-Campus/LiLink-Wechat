@@ -33,10 +33,11 @@ import type { Publisher, PublishInput, PublishResult } from './types'
 // - 已是微信域名(mmbiz.qpic.cn)的图：跳过（此前已上传过，避免重复）。
 function shouldUpload(src: string): boolean {
   if (!/^https?:\/\//i.test(src)) return false
-  // 严格 host 前缀 + 只认 https（与下方 badImg preflight 对齐）：只把 https://mmbiz.qpic.cn/
-  // 视为"已是微信图"，避免 evil-mmbiz.qpic.cn / evil.com/mmbiz.qpic.cn 子串欺骗；
-  // 万一遇 http:// 的旧微信图，这里当外链重新上传换 https（更鲁棒，codex review）。
-  if (/^https:\/\/mmbiz\.qpic\.cn\//i.test(src)) return false
+  // 严格 host 前缀：只把 mmbiz.qpic.cn 这一精确域名视为"已是微信图"，避免
+  // evil-mmbiz.qpic.cn / evil.com/mmbiz.qpic.cn 子串欺骗。
+  // 注意 scheme 用 https?：真机实测微信 uploadimg 返回的是 http://mmbiz.qpic.cn（非 https），
+  // 必须同时认 http 与 https，否则微信自己返回的正文图会被当外链重复上传。
+  if (/^https?:\/\/mmbiz\.qpic\.cn\//i.test(src)) return false
   return true
 }
 
@@ -154,7 +155,9 @@ export class WechatPublisher implements Publisher {
     // 发布前 preflight：正文图必须都是微信域名。若仍有非 mmbiz 的 <img src>，说明该图
     // 未成功上传/换 URL（相对路径/base64/上传失败）——draft/add 会过滤掉它导致掉图，
     // 这里提前阻止并明确报错（codex review High）。
-    const badImg = /<img\b[^>]*\bsrc="(?!https:\/\/mmbiz\.qpic\.cn\/)[^">]*"/i.exec(html)
+    // scheme 用 https?：真机实测微信 uploadimg 返回 http://mmbiz.qpic.cn（非 https），
+    // 放行 http+https 的 mmbiz（仍严格 host 防子串欺骗）；其余一律判为残留外链。
+    const badImg = /<img\b[^>]*\bsrc="(?!https?:\/\/mmbiz\.qpic\.cn\/)[^">]*"/i.exec(html)
     if (badImg) {
       throw new Error(
         `正文有图片未成功转为微信图片（会被公众号过滤导致掉图），已阻止发布：${badImg[0].slice(0, 100)}`,
