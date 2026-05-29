@@ -61,6 +61,15 @@ function escapeText(s: string): string {
 function escapeAttr(s: string): string {
   return escapeText(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }
+// href 协议白名单：只放行 http(s)/mailto/tel 与锚点/站内路径；其余（javascript:/data: 等）
+// 降级为 '#'，防止 javascript: 伪协议存活造成 XSS（codex review High）。
+function sanitizeHref(url: string | undefined): string {
+  const u = (url ?? '').trim()
+  if (!u) return '#'
+  if (/^(?:https?:|mailto:|tel:)/i.test(u)) return u
+  if (u.startsWith('#') || u.startsWith('/')) return u
+  return '#'
+}
 
 // 转换选项。
 export interface RenderToInlineHtmlOptions {
@@ -76,10 +85,13 @@ export interface RenderToInlineHtmlOptions {
    */
   internalDocToHref?: (linkNode: unknown) => string
   /**
-   * 与本层无关：图片 src 是否已被调用方替换为微信 URL / base64 由发布 / 预览侧处理，
-   * 本层只按 upload 节点已 populated 的 doc.url 原样输出。接受此字段仅为调用方
-   * 透传方便，不改变本层行为。
+   * 图片 URL 映射：原图 doc.url → 已上传的微信 mmbiz URL。
+   * 发布链路传入（先收集图片上传换 URL 再渲染），renderUpload 直接输出映射后的 URL，
+   * 避免"渲染后再字符串替换"因 HTML 转义(& → &amp;)不命中而残留外链（防掉图）。
+   * 预览 / 复制不传，按 doc.url 原样输出（云存储 https URL 可直接显示）。
    */
+  imageUrlMap?: Map<string, string>
+  /** 透传字段，不改变本层行为（保留向后兼容）。 */
   embedImages?: boolean
 }
 
@@ -196,7 +208,8 @@ const wechatConverters: HTMLConvertersFunction = (): HTMLConverters => {
       const tag = l.tag === 'ol' ? 'ol' : 'ul'
       const inner = nodesToHTML({ nodes: (l.children ?? []) as SerializedLexicalNode[] }).join('')
       const style = tag === 'ol' ? STYLE.ol : STYLE.ul
-      return `<${tag} style="${style}">${inner}</${tag}>`
+      // 列表块外包一个 <section>（design §3.2 每内容块各包一 section）。
+      return `<section><${tag} style="${style}">${inner}</${tag}></section>`
     },
 
     // 列表项 → <li>，文本前缀：无序 `• `；有序 `N. `（N = ol.start + 该项序号）。
@@ -229,7 +242,8 @@ const wechatConverters: HTMLConvertersFunction = (): HTMLConverters => {
     quote: ({ node, nodesToHTML }) => {
       const q = node as AnyNode
       const inner = nodesToHTML({ nodes: (q.children ?? []) as SerializedLexicalNode[] }).join('')
-      return `<blockquote style="${STYLE.callout}"><p style="${STYLE.calloutP}">${inner}</p></blockquote>`
+      // 引用块外包一个 <section>（design §3.2 每内容块各包一 section）。
+      return `<section><blockquote style="${STYLE.callout}"><p style="${STYLE.calloutP}">${inner}</p></blockquote></section>`
     },
 
     // 链接（自定义外链 / 内链）。正文 <a> 在 App 内不可点，仅视觉。
@@ -271,7 +285,7 @@ function renderLink(
   if (fields.linkType === 'internal') {
     href = opts.internalDocToHref ? opts.internalDocToHref(node) : '#'
   }
-  const safeHref = escapeAttr(href || '#')
+  const safeHref = escapeAttr(sanitizeHref(href))
   const target = fields.newTab ? ' target="_blank" rel="noopener noreferrer"' : ''
   return `<a href="${safeHref}" style="${STYLE.a}"${target}>${inner}</a>`
 }
@@ -293,22 +307,26 @@ function renderUpload(node: unknown): string {
     mimeType?: string
     filename?: string
   }
-  const url = d.url ?? ''
-  if (!url) return ''
+  const rawUrl = d.url ?? ''
+  if (!rawUrl) return ''
+  // 发布链路：若调用方传了 imageUrlMap，用映射后的微信 mmbiz URL（渲染即定，
+  // 无需事后字符串替换 —— 避开 & → &amp; 转义不命中导致外链残留/掉图）。
+  const url = currentOpts.imageUrlMap?.get(rawUrl) ?? rawUrl
 
-  // 非图片资源：降级为文件名链接（极少出现在正文）。
+  // 非图片资源：降级为文件名链接（极少出现在正文），href 走白名单，外包一个 section。
   if (d.mimeType && !d.mimeType.startsWith('image')) {
-    return `<a href="${escapeAttr(url)}" style="${STYLE.a}">${escapeText(d.filename ?? url)}</a>`
+    return `<section><a href="${escapeAttr(sanitizeHref(url))}" style="${STYLE.a}">${escapeText(d.filename ?? url)}</a></section>`
   }
 
   const altRaw = n.fields?.alt ?? d.alt ?? ''
   const capped = !RE_FILENAME_ALT.test(altRaw) // 文件名式 alt 不配题注
   const imgStyle = capped ? STYLE.imgCapped : STYLE.img
-  // 显式 width（design §3.2：否则 iOS 可能不显示）；属性值用双引号 + 转义。
+  // 显式 width（design §3.2：否则 iOS 可能不显示）；缺失时靠 STYLE.img 的 max-width:100% 兜底。
   const widthAttr = d.width ? ` width="${escapeAttr(String(d.width))}"` : ''
   const img = `<img src="${escapeAttr(url)}" alt="${escapeAttr(altRaw)}"${widthAttr} style="${imgStyle}" />`
   const caption = capped ? `<figcaption style="${STYLE.cap}">${escapeText(altRaw)}</figcaption>` : ''
-  return `<figure style="${STYLE.figure}">${img}${caption}</figure>`
+  // 每个图片块各包一个 <section>（design §3.2 每内容块各包一 section）。
+  return `<section><figure style="${STYLE.figure}">${img}${caption}</figure></section>`
 }
 
 // 文末 CTA 胶囊（分隔线 + 居中胶囊；pointer-events:none，仅视觉）。
@@ -316,7 +334,7 @@ function ctaBlock(url: string, text: string): string {
   return (
     `<hr style="${STYLE.hr}" />` +
     `<section style="${STYLE.ctaWrap}">` +
-    `<a href="${escapeAttr(url)}" style="${STYLE.cta}">${escapeText(text)}</a>` +
+    `<a href="${escapeAttr(sanitizeHref(url))}" style="${STYLE.cta}">${escapeText(text)}</a>` +
     `</section>`
   )
 }

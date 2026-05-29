@@ -26,7 +26,7 @@ const { renderMock } = vi.hoisted(() => ({
   renderMock: vi.fn(
     (
       data: unknown,
-      _opts?: { ctaUrl?: string; ctaText?: string; noCta?: boolean },
+      opts?: { ctaUrl?: string; ctaText?: string; noCta?: boolean; imageUrlMap?: Map<string, string> },
     ): string => {
       const imgs: string[] = []
       const root = (data as { root?: { children?: unknown } } | null | undefined)?.root
@@ -36,8 +36,13 @@ const { renderMock } = vi.hoisted(() => ({
           if (!raw || typeof raw !== 'object') continue
           const node = raw as Record<string, unknown>
           if (node.type === 'upload') {
-            const doc = node.value as { url?: string } | undefined
-            if (doc?.url) imgs.push(`<img src="${doc.url}" alt="" />`)
+            const doc = node.value as { url?: string; mimeType?: string } | undefined
+            // 非图片(如 pdf)：真实转换层降级为 <a>、不产 <img>；这里跳过，避免误判 badImg。
+            if (doc?.url && !(doc.mimeType && !doc.mimeType.startsWith('image'))) {
+              // 模拟真实转换层：有 imageUrlMap 则输出映射后的微信 URL（与 publisher 实际行为一致）。
+              const finalUrl = opts?.imageUrlMap?.get(doc.url) ?? doc.url
+              imgs.push(`<img src="${finalUrl}" alt="" />`)
+            }
             continue
           }
           if (Array.isArray(node.children)) walk(node.children)
@@ -253,16 +258,16 @@ describe('WechatPublisher.publish 链路', () => {
     expect(article.content).toContain('rendered')
   })
 
-  it('无封面图时跳过 addPermanentImage，thumb_media_id 为空串', async () => {
+  it('无封面图时 preflight 报错（公众号草稿必须有封面），不建草稿', async () => {
     const cc = makeChannelContent({ coverImage: null })
-    await new WechatPublisher().publish({
-      channelContent: cc,
-      wechat: { appId: 'APPID', appSecret: 'SECRET' },
-    })
-
+    await expect(
+      new WechatPublisher().publish({
+        channelContent: cc,
+        wechat: { appId: 'APPID', appSecret: 'SECRET' },
+      }),
+    ).rejects.toThrow(/封面/)
     expect(addPermanentImage).not.toHaveBeenCalled()
-    const article = (addDraft as any).mock.calls[0][1]
-    expect(article.thumb_media_id).toBe('')
+    expect(addDraft).not.toHaveBeenCalled()
   })
 
   it('封面字段为已 populate 的 Media 文档时，取其 url 上传', async () => {

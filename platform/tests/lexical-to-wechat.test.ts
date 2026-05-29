@@ -286,4 +286,48 @@ describe('renderToInlineHtml —— 公众号格式兼容硬规范', () => {
     const empty = renderToInlineHtml(null, { noCta: true })
     expect(empty).toBe(`<section style="${STYLE.root}"></section>`)
   })
+
+  // ---- codex review 修复回归 ----
+  it('href 协议白名单：javascript: 链接降级为 #（防 XSS）', () => {
+    const state = {
+      root: {
+        type: 'root', direction: 'ltr', format: '', indent: 0, version: 1,
+        children: [{
+          type: 'paragraph', direction: 'ltr', format: '', indent: 0, version: 1,
+          children: [{
+            type: 'link', direction: 'ltr', format: '', indent: 0, version: 1,
+            fields: { url: 'javascript:alert(1)', linkType: 'custom' },
+            children: [text('点我')],
+          }],
+        }],
+      },
+    } as unknown as SerializedEditorState
+    const html = renderToInlineHtml(state, { noCta: true })
+    expect(html).not.toContain('javascript:')
+    expect(html).toContain('href="#"')
+  })
+
+  it('imageUrlMap：含 & 的图 URL 渲染时直接换微信 URL，不残留原 URL（防掉图）', () => {
+    const orig = 'https://cdn.local/a.png?x=1&y=2'
+    const wx = 'https://mmbiz.qpic.cn/wx.jpg'
+    const state = {
+      root: {
+        type: 'root', direction: 'ltr', format: '', indent: 0, version: 1,
+        children: [{
+          type: 'upload', relationTo: 'media', version: 1, format: '', fields: { alt: '配图' },
+          value: { id: 'm1', url: orig, alt: '配图', width: 800, mimeType: 'image/png' },
+        }],
+      },
+    } as unknown as SerializedEditorState
+    const html = renderToInlineHtml(state, { noCta: true, imageUrlMap: new Map([[orig, wx]]) })
+    expect(html).toContain(`src="${wx}"`)
+    expect(html).not.toContain(orig)
+  })
+
+  it('每个内容块（图片/列表/引用）各包一个 <section>（design §3.2）', () => {
+    const html = renderToInlineHtml(buildState(), { noCta: true })
+    expect(html).toContain('<section><ul')
+    expect(html).toContain('<section><blockquote')
+    expect(html).toContain('<section><figure')
+  })
 })

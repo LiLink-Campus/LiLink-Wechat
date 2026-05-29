@@ -53,7 +53,7 @@ export const STYLE = {
   root: `margin:0;padding:0;font-family:${SANS};font-size:16px;line-height:1.9;color:${INK};text-align:start`,
 
   // 正文段落。必须内联 line-height（公众号会改写默认行距）。
-  p: `margin:0 0 1.15em;font-size:16px;line-height:1.9;color:${INK};text-align:start`,
+  p: `margin:0 0 1.15em;font-size:16px;line-height:1.9;letter-spacing:.02em;color:${INK};text-align:start`,
   // 次要 / 声明段。
   muted: `margin:0 0 1.15em;font-size:14px;line-height:1.85;color:${MUTED};text-align:start`,
 
@@ -70,7 +70,7 @@ export const STYLE = {
   ul: 'margin:.8em 0 1.15em;padding-left:1.35em',
   ol: 'margin:.8em 0 1.15em;padding-left:1.5em',
   // 列表项。无 list-style。
-  li: `margin:.45em 0;font-size:15.5px;line-height:1.85;color:${INK}`,
+  li: `margin:.45em 0;font-size:15.5px;line-height:1.85;letter-spacing:.02em;color:${INK}`,
 
   // 图片（带题注时下外边距归 0，让题注紧贴）。
   img: `display:block;max-width:100%;height:auto;margin:1.4em auto;border-radius:8px;border:1px solid ${IMG_BORDER}`,
@@ -83,7 +83,7 @@ export const STYLE = {
   // 提示卡（引用 quote 渲染成此）：玫瑰左线 + 极淡底。
   callout: `margin:1.4em 0;padding:13px 16px;border-left:2px solid ${ROSE};background:${FILL};border-radius:0 6px 6px 0;font-size:15px;line-height:1.85;color:${CALL}`,
   // 提示卡内部段落：清掉默认 margin，继承提示卡字号 / 行距 / 颜色。
-  calloutP: `margin:0;font-size:15px;line-height:1.85;color:${CALL}`,
+  calloutP: `margin:0;font-size:15px;line-height:1.85;letter-spacing:.02em;color:${CALL}`,
 
   // 分隔线（render.py 用 <p> 模拟，转换层改用真 <hr>，样式等价）。
   hr: `margin:2.6em auto;width:30px;border:none;border-top:1px solid ${RULE};height:0;line-height:0;font-size:0`,

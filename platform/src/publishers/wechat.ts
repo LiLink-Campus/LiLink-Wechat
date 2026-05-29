@@ -100,24 +100,6 @@ function collectImageUrls(data: SerializedEditorState | null | undefined): strin
   return out
 }
 
-// 转义正则元字符，供把任意原图 URL 当字面量构造替换正则用（URL 里常有 . ? & 等元字符）。
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-// 把渲染出的 HTML 里所有 <img ... src="原url" ...> 的 src 替换成微信 URL。
-// 只替换 src 属性值本身（双引号包裹——renderUpload 用 escapeAttr 输出双引号属性），
-// 不动 alt 等其它属性；同一原 URL 的多处出现全部替换。
-function replaceImgSrcs(html: string, urlMap: Map<string, string>): string {
-  let out = html
-  for (const [orig, wxUrl] of urlMap) {
-    // 仅匹配 src="原url" 这一精确形态（renderUpload 产出的就是双引号属性），避免误伤。
-    const re = new RegExp(`src="${escapeRegExp(orig)}"`, 'g')
-    out = out.replace(re, `src="${wxUrl}"`)
-  }
-  return out
-}
-
 export class WechatPublisher implements Publisher {
   // 平台标识，供 publishers 注册表检索。
   readonly platform = 'wechat'
@@ -135,6 +117,11 @@ export class WechatPublisher implements Publisher {
     if (coverSource) {
       const { mediaId } = await addPermanentImage(token, coverSource)
       thumbMediaId = mediaId
+    }
+    // 发布前 preflight：公众号草稿必须有封面（thumb_media_id），否则 draft/add 会失败。
+    // 提前明确报错，而不是发出空封面让微信侧报错（codex review High）。
+    if (!thumbMediaId) {
+      throw new Error('公众号草稿需要封面图，请先在渠道稿里选择「封面图」后再发布')
     }
 
     // ③ 正文图：遍历 Lexical body 收集 upload(image) 节点的原图 URL，逐个上传换微信 URL。
@@ -154,12 +141,22 @@ export class WechatPublisher implements Publisher {
     const renderConfig = (cc?.renderConfig ?? undefined) as
       | { ctaUrl?: string; ctaText?: string; noCta?: boolean }
       | undefined
-    const rawHtml = renderToInlineHtml(body, {
+    const html = renderToInlineHtml(body, {
       ctaUrl: renderConfig?.ctaUrl,
       ctaText: renderConfig?.ctaText,
       noCta: renderConfig?.noCta,
+      // 渲染时直接输出微信 URL，杜绝"渲染后字符串替换"因 & → &amp; 转义不命中而残留外链。
+      imageUrlMap: urlMap,
     })
-    const html = urlMap.size ? replaceImgSrcs(rawHtml, urlMap) : rawHtml
+    // 发布前 preflight：正文图必须都是微信域名。若仍有非 mmbiz 的 <img src>，说明该图
+    // 未成功上传/换 URL（相对路径/base64/上传失败）——draft/add 会过滤掉它导致掉图，
+    // 这里提前阻止并明确报错（codex review High）。
+    const badImg = /<img\b[^>]*\bsrc="(?!https:\/\/[^"]*mmbiz\.qpic\.cn\/)[^">]*"/i.exec(html)
+    if (badImg) {
+      throw new Error(
+        `正文有图片未成功转为微信图片（会被公众号过滤导致掉图），已阻止发布：${badImg[0].slice(0, 100)}`,
+      )
+    }
 
     // ⑤ 组装单篇草稿。title 兜底空串避免 undefined 进 JSON；author/digest/source_url
     //    为可选字段，缺省不传（微信会自行处理摘要/署名）。
