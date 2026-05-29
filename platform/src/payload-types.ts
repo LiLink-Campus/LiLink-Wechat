@@ -67,10 +67,10 @@ export interface Config {
   };
   blocks: {};
   collections: {
-    users: User;
-    media: Media;
     posts: Post;
     'channel-contents': ChannelContent;
+    media: Media;
+    users: User;
     'payload-kv': PayloadKv;
     'payload-locked-documents': PayloadLockedDocument;
     'payload-preferences': PayloadPreference;
@@ -78,10 +78,10 @@ export interface Config {
   };
   collectionsJoins: {};
   collectionsSelect: {
-    users: UsersSelect<false> | UsersSelect<true>;
-    media: MediaSelect<false> | MediaSelect<true>;
     posts: PostsSelect<false> | PostsSelect<true>;
     'channel-contents': ChannelContentsSelect<false> | ChannelContentsSelect<true>;
+    media: MediaSelect<false> | MediaSelect<true>;
+    users: UsersSelect<false> | UsersSelect<true>;
     'payload-kv': PayloadKvSelect<false> | PayloadKvSelect<true>;
     'payload-locked-documents': PayloadLockedDocumentsSelect<false> | PayloadLockedDocumentsSelect<true>;
     'payload-preferences': PayloadPreferencesSelect<false> | PayloadPreferencesSelect<true>;
@@ -122,6 +122,42 @@ export interface UserAuthOperations {
   };
 }
 /**
+ * 一个创作单元（一个题材）。在这里定主题、负责人、共享素材，再去「渠道稿」为各平台成稿。
+ *
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "posts".
+ */
+export interface Post {
+  id: number;
+  title: string;
+  /**
+   * 选题归类，便于聚合检索。
+   */
+  topic?: string | null;
+  /**
+   * 自由标签，可加多个。
+   */
+  tags?:
+    | {
+        tag?: string | null;
+        id?: string | null;
+      }[]
+    | null;
+  owner?: (number | null) | User;
+  /**
+   * 跨渠道复用的图 / 音 / 视频。
+   */
+  sharedAssets?: (number | Media)[] | null;
+  /**
+   * 内部备注 / 创作思路。
+   */
+  notes?: string | null;
+  updatedAt: string;
+  createdAt: string;
+}
+/**
+ * 团队运营成员账号。第一期三人全能、权限不细分，靠「渠道稿」的状态流转来协作。
+ *
  * This interface was referenced by `Config`'s JSON-Schema
  * via the `definition` "users".
  */
@@ -149,15 +185,26 @@ export interface User {
   collection: 'users';
 }
 /**
+ * 图片 / 音频 / 视频素材，供选题与渠道稿引用（第一期以图片为主）。
+ *
  * This interface was referenced by `Config`'s JSON-Schema
  * via the `definition` "media".
  */
 export interface Media {
   id: number;
   type: 'image' | 'audio' | 'video';
+  /**
+   * 替代文本（无障碍 / SEO），同时作为后台标题；建议填有意义的描述。
+   */
   alt?: string | null;
+  /**
+   * 配图下方的说明文字。
+   */
   caption?: string | null;
   credit?: string | null;
+  /**
+   * 音视频时长，由上传后处理写入。
+   */
   duration?: number | null;
   updatedAt: string;
   createdAt: string;
@@ -172,53 +219,65 @@ export interface Media {
   focalY?: number | null;
 }
 /**
- * This interface was referenced by `Config`'s JSON-Schema
- * via the `definition` "posts".
- */
-export interface Post {
-  id: number;
-  title: string;
-  topic?: string | null;
-  tags?:
-    | {
-        tag?: string | null;
-        id?: string | null;
-      }[]
-    | null;
-  owner?: (number | null) | User;
-  sharedAssets?: (number | Media)[] | null;
-  notes?: string | null;
-  updatedAt: string;
-  createdAt: string;
-}
-/**
+ * 选题在某平台的具体稿件 + 发布状态。第一期做公众号：写正文、选封面、排版预览，走「草稿→待审核→已批准→已发布」。
+ *
  * This interface was referenced by `Config`'s JSON-Schema
  * via the `definition` "channel-contents".
  */
 export interface ChannelContent {
   id: number;
+  /**
+   * 这篇稿子属于哪个选题。
+   */
   post: number | Post;
+  /**
+   * 选平台后会显示该平台专属字段（第一期仅公众号可用）。
+   */
   platform: 'wechat' | 'xiaohongshu' | 'x' | 'douyin' | 'bilibili';
   wxTitle?: string | null;
   wxAuthor?: string | null;
+  /**
+   * 公众号摘要；留空时微信会自动从正文截取。
+   */
   wxDigest?: string | null;
+  /**
+   * 用 Markdown 写正文，发布时由排版脚本渲染成公众号 HTML。
+   */
   bodyMarkdown?: string | null;
+  /**
+   * 从媒体库选一张图作公众号封面（建议用云存储的图，详见 README）。
+   */
   coverImage?: (number | null) | Media;
+  /**
+   * 公众号「阅读原文」跳转地址，发布时自动写入。
+   */
   sourceUrl?: string | null;
   renderConfig?: {
     ctaUrl?: string | null;
     ctaText?: string | null;
     noCta?: boolean | null;
   };
+  /**
+   * 只能通过「提交/审核/发布」动作流转，不能直接改。
+   */
   status?: ('draft' | 'in_review' | 'approved' | 'published') | null;
   assignee?: (number | null) | User;
+  /**
+   * 排版脚本产出的公众号 HTML，只读。
+   */
   renderedHtmlPreview?: string | null;
+  /**
+   * 发布流水线回填，全部只读。
+   */
   publishResult?: {
     wxDraftMediaId?: string | null;
     publishedAt?: string | null;
     lastError?: string | null;
     stage?: ('none' | 'draft_created' | 'mass_sent') | null;
   };
+  /**
+   * 状态流转审计记录（系统自动写入）。
+   */
   transitionLog?:
     | {
         [k: string]: unknown;
@@ -256,20 +315,20 @@ export interface PayloadLockedDocument {
   id: number;
   document?:
     | ({
-        relationTo: 'users';
-        value: number | User;
-      } | null)
-    | ({
-        relationTo: 'media';
-        value: number | Media;
-      } | null)
-    | ({
         relationTo: 'posts';
         value: number | Post;
       } | null)
     | ({
         relationTo: 'channel-contents';
         value: number | ChannelContent;
+      } | null)
+    | ({
+        relationTo: 'media';
+        value: number | Media;
+      } | null)
+    | ({
+        relationTo: 'users';
+        value: number | User;
       } | null);
   globalSlug?: string | null;
   user: {
@@ -312,52 +371,6 @@ export interface PayloadMigration {
   batch?: number | null;
   updatedAt: string;
   createdAt: string;
-}
-/**
- * This interface was referenced by `Config`'s JSON-Schema
- * via the `definition` "users_select".
- */
-export interface UsersSelect<T extends boolean = true> {
-  name?: T;
-  role?: T;
-  updatedAt?: T;
-  createdAt?: T;
-  email?: T;
-  resetPasswordToken?: T;
-  resetPasswordExpiration?: T;
-  salt?: T;
-  hash?: T;
-  loginAttempts?: T;
-  lockUntil?: T;
-  sessions?:
-    | T
-    | {
-        id?: T;
-        createdAt?: T;
-        expiresAt?: T;
-      };
-}
-/**
- * This interface was referenced by `Config`'s JSON-Schema
- * via the `definition` "media_select".
- */
-export interface MediaSelect<T extends boolean = true> {
-  type?: T;
-  alt?: T;
-  caption?: T;
-  credit?: T;
-  duration?: T;
-  updatedAt?: T;
-  createdAt?: T;
-  url?: T;
-  thumbnailURL?: T;
-  filename?: T;
-  mimeType?: T;
-  filesize?: T;
-  width?: T;
-  height?: T;
-  focalX?: T;
-  focalY?: T;
 }
 /**
  * This interface was referenced by `Config`'s JSON-Schema
@@ -412,6 +425,52 @@ export interface ChannelContentsSelect<T extends boolean = true> {
   transitionLog?: T;
   updatedAt?: T;
   createdAt?: T;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "media_select".
+ */
+export interface MediaSelect<T extends boolean = true> {
+  type?: T;
+  alt?: T;
+  caption?: T;
+  credit?: T;
+  duration?: T;
+  updatedAt?: T;
+  createdAt?: T;
+  url?: T;
+  thumbnailURL?: T;
+  filename?: T;
+  mimeType?: T;
+  filesize?: T;
+  width?: T;
+  height?: T;
+  focalX?: T;
+  focalY?: T;
+}
+/**
+ * This interface was referenced by `Config`'s JSON-Schema
+ * via the `definition` "users_select".
+ */
+export interface UsersSelect<T extends boolean = true> {
+  name?: T;
+  role?: T;
+  updatedAt?: T;
+  createdAt?: T;
+  email?: T;
+  resetPasswordToken?: T;
+  resetPasswordExpiration?: T;
+  salt?: T;
+  hash?: T;
+  loginAttempts?: T;
+  lockUntil?: T;
+  sessions?:
+    | T
+    | {
+        id?: T;
+        createdAt?: T;
+        expiresAt?: T;
+      };
 }
 /**
  * This interface was referenced by `Config`'s JSON-Schema
