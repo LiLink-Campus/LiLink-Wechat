@@ -1,3 +1,4 @@
+import './force-ipv4'
 import { basename } from 'node:path'
 import { explainWxError } from './errors'
 
@@ -99,6 +100,9 @@ const FETCH_TIMEOUT_MS = 10_000
 // 安全地把图片 URL 取成 Buffer：限协议 + 拦内网 + 禁重定向 + 超时 + 大小上限 + Content-Type 校验。
 async function fetchImageBuffer(rawUrl: string): Promise<{ buf: Buffer; filename: string }> {
   const u = new URL(rawUrl)
+  // 错误信息只用 origin+pathname，去掉 query —— presigned URL 的 ?X-Amz-Signature=... 不应
+  // 写进 publishResult.lastError / HTTP 响应 / 日志（codex review Medium）。
+  const safeUrl = u.origin + u.pathname
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     throw new Error(`不支持的图片协议：${u.protocol}`)
   }
@@ -112,7 +116,7 @@ async function fetchImageBuffer(rawUrl: string): Promise<{ buf: Buffer; filename
     // redirect:'error' 防经 3xx 重定向绕过上面的内网拦截。
     const res = await fetch(u, { signal: ctrl.signal, redirect: 'error' })
     if (!res.ok) {
-      throw new Error(`下载图片失败：${rawUrl}（HTTP ${res.status}）`)
+      throw new Error(`下载图片失败：${safeUrl}（HTTP ${res.status}）`)
     }
     const ct = res.headers.get('content-type') ?? ''
     if (!ct.toLowerCase().startsWith('image/')) {
@@ -122,11 +126,11 @@ async function fetchImageBuffer(rawUrl: string): Promise<{ buf: Buffer; filename
     // 缺失/撒谎时由下面 arrayBuffer 后的 byteLength 兜底。
     const declaredLen = Number(res.headers.get('content-length') ?? '')
     if (Number.isFinite(declaredLen) && declaredLen > MAX_IMAGE_BYTES) {
-      throw new Error(`图片过大（Content-Length ${declaredLen} > ${MAX_IMAGE_BYTES}）：${rawUrl}`)
+      throw new Error(`图片过大（Content-Length ${declaredLen} > ${MAX_IMAGE_BYTES}）：${safeUrl}`)
     }
     const ab = await res.arrayBuffer()
     if (ab.byteLength > MAX_IMAGE_BYTES) {
-      throw new Error(`图片过大（>${MAX_IMAGE_BYTES} 字节）：${rawUrl}`)
+      throw new Error(`图片过大（>${MAX_IMAGE_BYTES} 字节）：${safeUrl}`)
     }
     const name = basename(u.pathname) || 'image.jpg'
     return { buf: Buffer.from(ab), filename: name }

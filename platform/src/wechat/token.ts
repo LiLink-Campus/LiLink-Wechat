@@ -1,3 +1,4 @@
+import './force-ipv4'
 import { explainWxError } from './errors'
 
 // 微信 access_token 接口返回结构。
