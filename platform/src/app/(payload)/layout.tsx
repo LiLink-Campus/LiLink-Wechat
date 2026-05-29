@@ -8,10 +8,10 @@ import React from 'react'
 
 import { importMap } from './admin/importMap.js'
 // Payload admin 样式。@payloadcms/ui 经 node_modules 解析到 dist，RootLayout 的 SCSS
-// 编译链不会自动注入，必须在此显式 import 两份 dist 样式，否则 admin 退化成裸 HTML：
-//   - @payloadcms/ui/styles.css：UI 组件样式（字段、按钮、表单控件等）
-//   - @payloadcms/next/css：admin 应用级布局样式（登录/首用户的 template-minimal 居中容器、导航、仪表盘等）
-import '@payloadcms/ui/styles.css'
+// 编译链不会自动注入，必须在此显式 import，否则 admin 退化成裸 HTML。
+// @payloadcms/next/css（其 ./css 导出 → dist/prod/styles.css）是完整 admin 样式，且为
+// @payloadcms/ui/styles.css 的超集（含 UI 组件 + admin 应用布局，如 template-minimal 登录
+// 居中容器），故只需这一份；custom.scss 放最后用于覆盖。
 import '@payloadcms/next/css'
 import './custom.scss'
 
