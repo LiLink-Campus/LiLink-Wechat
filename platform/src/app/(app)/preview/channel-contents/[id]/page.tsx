@@ -81,15 +81,13 @@ export default async function ChannelContentPreviewPage({
   }
 
   if (!doc) {
+    // 注意：本页在 (app) 路由组内，<html>/<body> 由 (app)/layout.tsx 提供——
+    // 这里只返回内容容器，绝不再渲染 <html>/<body>（否则嵌套 <html> 触发 hydration 错乱）。
     return (
-      <html lang="zh-CN">
-        <body style={{ margin: 0, fontFamily: 'system-ui, sans-serif' }}>
-          <main style={{ padding: '3rem', textAlign: 'center', color: '#666' }}>
-            <h1 style={{ fontSize: '1.25rem' }}>找不到这篇渠道稿</h1>
-            <p>id：{id}</p>
-          </main>
-        </body>
-      </html>
+      <main style={{ padding: '3rem', textAlign: 'center', color: '#666', fontFamily: 'system-ui, sans-serif' }}>
+        <h1 style={{ fontSize: '1.25rem' }}>找不到这篇渠道稿</h1>
+        <p>id：{id}</p>
+      </main>
     )
   }
 
@@ -100,47 +98,46 @@ export default async function ChannelContentPreviewPage({
 
   const title = (typeof doc.wxTitle === 'string' && doc.wxTitle) || '渠道稿预览'
 
+  // 注意：本页在 (app) 路由组内，<html>/<body> 由 (app)/layout.tsx 提供——这里用一个
+  // 全屏 <div> 模拟「手机屏」背景，绝不再渲染 <html>/<body>（否则嵌套触发 hydration 错乱）。
   return (
-    <html lang="zh-CN">
-      <body
+    <div
+      style={{
+        // 预览「屏外」的背景仅用于肉眼模拟手机——与产物无关，产物永远全内联。
+        background: '#ebeced',
+        minHeight: '100vh',
+        padding: '24px 0',
+        fontFamily:
+          '-apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", Roboto, sans-serif',
+      }}
+    >
+      <main
         style={{
-          margin: 0,
-          // 预览「屏外」的背景与容器样式仅用于肉眼模拟手机——与产物无关，产物永远全内联。
-          background: '#ebeced',
-          minHeight: '100vh',
-          padding: '24px 0',
-          fontFamily:
-            '-apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", Roboto, sans-serif',
+          maxWidth: 390,
+          margin: '0 auto',
+          background: '#ffffff',
+          minHeight: 'calc(100vh - 48px)',
+          boxShadow: '0 1px 8px rgba(0,0,0,0.08)',
+          // 公众号正文区左右各约 20px 留白，贴近真机。
+          padding: '20px 16px',
+          boxSizing: 'border-box',
         }}
       >
-        <main
+        {/* 标题区仅预览用（公众号标题由后台单独字段管理，不进正文 HTML）。 */}
+        <h1
           style={{
-            maxWidth: 390,
-            margin: '0 auto',
-            background: '#ffffff',
-            minHeight: 'calc(100vh - 48px)',
-            boxShadow: '0 1px 8px rgba(0,0,0,0.08)',
-            // 公众号正文区左右各约 20px 留白，贴近真机。
-            padding: '20px 16px',
-            boxSizing: 'border-box',
+            fontSize: 22,
+            lineHeight: 1.4,
+            fontWeight: 700,
+            color: '#1a1a1a',
+            margin: '4px 0 16px',
           }}
         >
-          {/* 标题区仅预览用（公众号标题由后台单独字段管理，不进正文 HTML）。 */}
-          <h1
-            style={{
-              fontSize: 22,
-              lineHeight: 1.4,
-              fontWeight: 700,
-              color: '#1a1a1a',
-              margin: '4px 0 16px',
-            }}
-          >
-            {title}
-          </h1>
-          {/* 这一份就是发布/复制会用的同一串全内联 HTML —— 预览=最终。 */}
-          <div dangerouslySetInnerHTML={{ __html: html }} />
-        </main>
-      </body>
-    </html>
+          {title}
+        </h1>
+        {/* 这一份就是发布/复制会用的同一串全内联 HTML —— 预览=最终。 */}
+        <div dangerouslySetInnerHTML={{ __html: html }} />
+      </main>
+    </div>
   )
 }
