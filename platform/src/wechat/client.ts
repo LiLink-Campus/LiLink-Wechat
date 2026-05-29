@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 import { explainWxError } from './errors'
 
@@ -21,8 +20,9 @@ export interface DraftArticle {
   need_open_comment?: number
 }
 
-// file 入参的三种形态：内存 Buffer / 本地文件路径 / 远程 URL。
-// 用 string 同时承载「本地路径」和「URL」，靠是否以 http(s):// 开头区分。
+// file 入参形态：内存 Buffer 或 http(s) 图片 URL（字符串）。
+// 安全约束：不再支持本地文件路径（曾可被用户可控的 markdown 图片 src 如
+// ![](/etc/passwd) 利用读取服务器本地文件）—— 见 toBlobPart。
 export type WxFileInput = Buffer | string
 
 // 微信上传/草稿接口的通用响应骨架，各接口在此基础上扩展自己的字段。
@@ -45,33 +45,64 @@ interface WxAddDraftResponse extends WxBaseResponse {
   media_id?: string
 }
 
+// 拒绝指向内网/环回/链路本地/保留地址的 host，防 SSRF（图片 URL 可由已认证作者控制）。
+// 第一期挡住直接以 IP/localhost 形态探测内网；合法图片来自公网云对象存储(OSS/COS/R2)。
+const BLOCKED_HOST_RE =
+  /^(localhost|0\.0\.0\.0|127\.|10\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|fe80:|fc|fd)/i
+
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024 // 10MB 上限，防超大响应耗内存。
+const FETCH_TIMEOUT_MS = 10_000
+
+// 安全地把图片 URL 取成 Buffer：限协议 + 拦内网 + 禁重定向 + 超时 + 大小上限 + Content-Type 校验。
+async function fetchImageBuffer(rawUrl: string): Promise<{ buf: Buffer; filename: string }> {
+  const u = new URL(rawUrl)
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`不支持的图片协议：${u.protocol}`)
+  }
+  if (BLOCKED_HOST_RE.test(u.hostname)) {
+    throw new Error(`拒绝访问内网/环回地址的图片源：${u.hostname}`)
+  }
+
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
+  try {
+    // redirect:'error' 防经 3xx 重定向绕过上面的内网拦截。
+    const res = await fetch(u, { signal: ctrl.signal, redirect: 'error' })
+    if (!res.ok) {
+      throw new Error(`下载图片失败：${rawUrl}（HTTP ${res.status}）`)
+    }
+    const ct = res.headers.get('content-type') ?? ''
+    if (!ct.toLowerCase().startsWith('image/')) {
+      throw new Error(`图片源 Content-Type 非 image/*：${ct || '(空)'}`)
+    }
+    const ab = await res.arrayBuffer()
+    if (ab.byteLength > MAX_IMAGE_BYTES) {
+      throw new Error(`图片过大（>${MAX_IMAGE_BYTES} 字节）：${rawUrl}`)
+    }
+    const name = basename(u.pathname) || 'image.jpg'
+    return { buf: Buffer.from(ab), filename: name }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /**
- * 把多形态的 file 入参统一成 { blob, filename }，供 FormData 使用。
- * - Buffer：直接包成 Blob，文件名兜底为 image.jpg（微信靠 type=image 而非扩展名判断）。
- * - URL（http/https 开头）：先 fetch 成 ArrayBuffer，文件名取 URL 路径末段。
- * - 本地路径：读盘成 Buffer，文件名取路径末段。
+ * 把 file 入参统一成 { blob, filename }，供 FormData 使用。
+ * 只接受：内存 Buffer，或 http(s) 图片 URL（经 fetchImageBuffer 安全下载）。
+ * **不再支持本地文件路径**——历史上把任意字符串当本地路径 readFile 会被用户可控的
+ * markdown 图片 src（如 ![](/etc/passwd)）利用读取服务器本地文件（LFI）。
  */
 async function toBlobPart(file: WxFileInput): Promise<{ blob: Blob; filename: string }> {
   if (Buffer.isBuffer(file)) {
     // Buffer 的底层是 ArrayBuffer，包成 Uint8Array 再给 Blob，类型在 @types/node 下可接受。
     return { blob: new Blob([new Uint8Array(file)]), filename: 'image.jpg' }
   }
-
-  if (/^https?:\/\//i.test(file)) {
-    const res = await fetch(file)
-    if (!res.ok) {
-      throw new Error(`下载图片失败：${file}（HTTP ${res.status}）`)
-    }
-    const buf = Buffer.from(await res.arrayBuffer())
-    // 去掉 URL query/hash，取路径末段作文件名；取不到就兜底。
-    const pathname = new URL(file).pathname
-    const name = basename(pathname) || 'image.jpg'
-    return { blob: new Blob([new Uint8Array(buf)]), filename: name }
+  if (typeof file === 'string' && /^https?:\/\//i.test(file)) {
+    const { buf, filename } = await fetchImageBuffer(file)
+    return { blob: new Blob([new Uint8Array(buf)]), filename }
   }
-
-  // 视为本地文件路径。
-  const buf = await readFile(file)
-  return { blob: new Blob([new Uint8Array(buf)]), filename: basename(file) || 'image.jpg' }
+  // 非 Buffer、非 http(s) URL（含本地路径）一律拒绝。
+  throw new Error(`不支持的图片来源（仅接受 Buffer 或 http(s) URL）：${String(file)}`)
 }
 
 /**

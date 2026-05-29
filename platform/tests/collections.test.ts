@@ -1,7 +1,23 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import type { Payload } from 'payload'
+import type { CollectionSlug, Payload, RequiredDataFromCollectionSlug } from 'payload'
 import { getPayload } from 'payload'
 import config from '@payload-config'
+
+// 窄类型测试 helper：用于「字段在 collection 里 required: true 但带 defaultValue」的
+// create 场景。Payload 生成的类型会把所有 required 字段标成必填（无视 defaultValue），
+// 于是只传部分字段时，create 的非草稿重载因 data 不全而落到要求 `draft: true` 的草稿
+// 重载、报 “Property 'draft' is missing”。这里把 data 收窄成 Partial<Required…>，让用例
+// 可以故意省略带默认值的字段去断言其默认值，同时仍对实际传入的字段做类型检查；
+// 唯一的类型放宽（cast）被收敛在此一处，且 collection slug 仍受完整校验。
+const createWithDefaults = <TSlug extends CollectionSlug>(
+  payload: Payload,
+  collection: TSlug,
+  data: Partial<RequiredDataFromCollectionSlug<TSlug>>,
+) =>
+  payload.create({
+    collection,
+    data: data as RequiredDataFromCollectionSlug<TSlug>,
+  })
 
 // 内容模型集成测试（Media / Posts / ChannelContents）。
 //
@@ -60,13 +76,11 @@ describe.skipIf(!hasDb)('内容模型 collections（需 DB）', () => {
       data: { title: '渠道稿母体' },
     })
 
-    const cc = await payload.create({
-      collection: 'channel-contents',
-      data: {
-        post: post.id,
-        wxTitle: '公众号标题',
-        // platform / status / sourceUrl / publishResult.stage 走默认值
-      },
+    // 用窄类型 helper：故意省略 platform（required + defaultValue:'wechat'），
+    // 以验证其默认值；status / sourceUrl / publishResult.stage 同样走默认值。
+    const cc = await createWithDefaults(payload, 'channel-contents', {
+      post: post.id,
+      wxTitle: '公众号标题',
     })
 
     expect(cc.platform).toBe('wechat')

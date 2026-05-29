@@ -97,6 +97,24 @@ export async function applyTransition(
     ? current.transitionLog
     : []
 
+  // 并发覆写的轻量乐观防护（非原子）：
+  //   本函数是「读(findByID)-改-写(update)」结构，两次操作之间若有并发流转穿插，
+  //   后写者会用基于旧 transitionLog 拼出的数组覆盖前写者的状态与审计，导致审计丢条
+  //   或状态被回退。第一期 3 人低并发，这里不引入 DB 事务，只做最佳努力的二次校验：
+  //   update 前再读一次，确认 status 仍是我们这次决策所基于的 from；若已被并发流转改动，
+  //   则放弃本次写入并报错（交由上层重试或人工处理），避免基于陈旧快照盲写覆盖。
+  //   权衡：这只缩小竞态窗口、并不能根除——第二次读与下面 update 之间仍有微小窗口；
+  //   完整原子性（DB 事务 / 基于 status 的条件 CAS 更新）留后续任务。
+  const recheck = await payload.findByID({
+    collection: CHANNEL_CONTENTS_SLUG,
+    id,
+  })
+  if (recheck && recheck.status !== from) {
+    throw new Error(
+      `状态流转并发冲突：期望当前为 ${from}，实际为 ${String(recheck.status)}（请重试）`,
+    )
+  }
+
   // 写新状态 + 追加审计。status 为保证字段；transitionLog 若集合未定义会被忽略。
   await payload.update({
     collection: CHANNEL_CONTENTS_SLUG,

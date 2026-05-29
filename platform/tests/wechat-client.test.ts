@@ -110,7 +110,7 @@ describe('uploadContentImage', () => {
     const result = await uploadContentImage('TKN', Buffer.from('fakeimg'))
     expect(result).toEqual({ url: 'https://mmbiz.qpic.cn/x.jpg' })
 
-    const [calledUrl, init] = fetchMock.mock.calls[0] as [URL | string, RequestInit]
+    const [calledUrl, init] = fetchMock.mock.calls[0] as unknown as [URL | string, RequestInit]
     const u = new URL(String(calledUrl))
     expect(u.origin + u.pathname).toBe('https://api.weixin.qq.com/cgi-bin/media/uploadimg')
     expect(u.searchParams.get('access_token')).toBe('TKN')
@@ -137,6 +137,8 @@ describe('uploadContentImage', () => {
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
+        // client 现在会校验下载响应的 Content-Type 必须是 image/*，mock 需带上。
+        headers: new Headers({ 'content-type': 'image/png' }),
         arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
       } as unknown as Response)
       // 第二次：上传到微信。
@@ -163,7 +165,7 @@ describe('addPermanentImage', () => {
     const result = await addPermanentImage('TKN', Buffer.from('cover'))
     expect(result).toEqual({ mediaId: 'MID', url: 'https://mmbiz.qpic.cn/cover.jpg' })
 
-    const [calledUrl, init] = fetchMock.mock.calls[0] as [URL | string, RequestInit]
+    const [calledUrl, init] = fetchMock.mock.calls[0] as unknown as [URL | string, RequestInit]
     const u = new URL(String(calledUrl))
     expect(u.origin + u.pathname).toBe('https://api.weixin.qq.com/cgi-bin/material/add_material')
     expect(u.searchParams.get('access_token')).toBe('TKN')
@@ -202,7 +204,7 @@ describe('addDraft', () => {
     const result = await addDraft('TKN', article)
     expect(result).toEqual({ mediaId: 'DRAFT_MID' })
 
-    const [calledUrl, init] = fetchMock.mock.calls[0] as [URL | string, RequestInit]
+    const [calledUrl, init] = fetchMock.mock.calls[0] as unknown as [URL | string, RequestInit]
     const u = new URL(String(calledUrl))
     expect(u.origin + u.pathname).toBe('https://api.weixin.qq.com/cgi-bin/draft/add')
     expect(u.searchParams.get('access_token')).toBe('TKN')

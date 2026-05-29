@@ -25,8 +25,9 @@ import type { Publisher, PublishInput, PublishResult } from './types'
 
 // Markdown 图片语法 ![alt](src "可选title") 的匹配。
 // - 捕获组 1：alt 文本；捕获组 2：括号内的整体（src + 可选 title）。
-// 用全局匹配遍历所有图片；src 的进一步切分（剥离 title / 尖括号）在 extractSrc 里做。
-const MD_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g
+// 括号内支持 <url>（尖括号形式）或含一层嵌套括号的内容（如 img(1).png），避免遇到
+// URL 里的 ) 提前截断；src 的进一步切分（剥离 title/尖括号）在 extractSrc 里做。
+const MD_IMAGE_RE = /!\[([^\]]*)\]\((<[^>]*>|[^()]*(?:\([^()]*\)[^()]*)*)\)/g
 
 // 从 Markdown 图片括号内容里取出纯 src。
 // 形如 (path "title") / (<path> "title") / (path) 都能正确取到 path。
@@ -44,25 +45,30 @@ function extractSrc(inside: string): string {
   return s.trim()
 }
 
-// 判断某个 src 是否需要上传到微信。
-// - data: 内联图：跳过（已是内联数据，无法/无需上传）。
-// - 其余（本地相对/绝对路径、http(s) URL）：都尝试上传。
-//   uploadContentImage 自身支持 Buffer / 本地路径 / URL 三种入参，这里把 src 原样交给它。
+// 判断某个 src 是否需要上传到微信正文图。只上传 http(s) URL（合法图片来自公网云对象存储）：
+// - data: 内联图、本地相对/绝对路径：跳过（client 已不再读本地文件，防 LFI）。
+// - 已是微信域名(mmbiz.qpic.cn)的图：跳过（此前已上传过，避免重复）。
 function shouldUpload(src: string): boolean {
-  return !src.startsWith('data:')
+  if (!/^https?:\/\//i.test(src)) return false
+  if (/^https?:\/\/[^/]*mmbiz\.qpic\.cn/i.test(src)) return false
+  return true
 }
 
-// 把一个 media 关系字段解析成 addPermanentImage 能接受的入参（URL 或本地路径字符串）。
-// - 已 populate 的 Media 文档：优先取 url（上传后微信侧/本地可访问的地址），退而取 filename。
-// - 直接是字符串（未 populate，仅 id；或调用方已传好 URL/路径）：原样返回。
-// 解析不出可用来源时返回 undefined，调用方据此跳过封面（不阻断整篇发布）。
+// 把 media 关系字段解析成 addPermanentImage 能接受的封面 URL。
+// 安全约束：只接受 http(s) 绝对 URL（client 已不再读本地文件/相对路径）。
+// - 已 populate 的 Media 文档：取其 url，且必须是 http(s)（媒体走云对象存储时即为公网 https）。
+// - 字符串：仅当是 http(s) URL 才用。
+// 取不到可用 http(s) 来源时返回 undefined，调用方跳过封面（不阻断整篇发布）。
+// 注意：若媒体库用本地磁盘且 url 为相对路径，这里取不到封面——第一期媒体应走云对象存储
+// (绝对 https url)，或为 Payload 配置 serverURL 使 media.url 为绝对地址。
 function resolveCoverSource(coverImage: unknown): string | undefined {
   if (!coverImage) return undefined
-  if (typeof coverImage === 'string') return coverImage
+  if (typeof coverImage === 'string') {
+    return /^https?:\/\//i.test(coverImage) ? coverImage : undefined
+  }
   if (typeof coverImage === 'object') {
     const obj = coverImage as Record<string, unknown>
-    if (typeof obj.url === 'string' && obj.url) return obj.url
-    if (typeof obj.filename === 'string' && obj.filename) return obj.filename
+    if (typeof obj.url === 'string' && /^https?:\/\//i.test(obj.url)) return obj.url
   }
   return undefined
 }

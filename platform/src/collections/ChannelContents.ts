@@ -110,7 +110,10 @@ export const ChannelContents: CollectionConfig = {
       type: 'select',
       defaultValue: 'draft',
       // 渠道稿状态机：草稿→待审→已批→已发布。由流转动作写入，后台只读。
+      // 字段级 access 拒绝一切经访问控制的写入（admin.readOnly 只挡 UI，挡不住 API）；
+      // 仅 transition/publish endpoint 内部 payload.update(Local API 默认 overrideAccess) 能改。
       admin: { readOnly: true },
+      access: { update: () => false },
       options: [
         { label: '草稿', value: 'draft' },
         { label: '待审核', value: 'in_review' },
@@ -135,6 +138,7 @@ export const ChannelContents: CollectionConfig = {
       type: 'group',
       // 发布结果回填（草稿 mediaId、发布时间、最近错误、阶段），全部由流水线写入。
       admin: { readOnly: true },
+      access: { update: () => false },
       fields: [
         {
           name: 'wxDraftMediaId',
@@ -166,6 +170,7 @@ export const ChannelContents: CollectionConfig = {
       // 状态流转审计：每次流转由 applyTransition 追加一条 {from,to,user,at,reason?}。
       // 用 json 以兼容任意 entry 结构（user id 可能是 number），后台只读。
       admin: { readOnly: true },
+      access: { update: () => false },
     },
   ],
 }

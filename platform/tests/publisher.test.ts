@@ -21,7 +21,13 @@ vi.mock('../src/wechat/client', () => ({
 // 用 vi.hoisted 定义 renderMock —— vi.mock 工厂被提升到文件顶端，普通 top-level 变量
 // 在工厂运行时尚未初始化（报 Cannot access before initialization）；hoisted 块同被提升故可用。
 const { renderMock } = vi.hoisted(() => ({
-  renderMock: vi.fn(async () => ({ html: '<p>rendered</p>', warnings: [] as string[] })),
+  // 声明入参类型，使 renderMock.mock.calls[0][0] 有类型（否则严格模式下空元组索引报错）。
+  renderMock: vi.fn(
+    async (_input: { markdown: string; embedImages?: boolean; config?: unknown }) => ({
+      html: '<p>rendered</p>',
+      warnings: [] as string[],
+    }),
+  ),
 }))
 vi.mock('../src/renderers', () => ({
   renderers: {
@@ -55,7 +61,7 @@ function makeChannelContent(overrides: Record<string, unknown> = {}) {
     wxDigest: '摘要',
     sourceUrl: 'https://lilink.top',
     coverImage: { id: 'm1', url: 'https://cdn.local/cover.png' },
-    bodyMarkdown: '开头\n\n![图一](pic1.png)\n\n中间\n\n![图二](https://ex.com/pic2.png)\n\n再次出现图一 ![又是图一](pic1.png)\n\n结尾',
+    bodyMarkdown: '开头\n\n![图一](https://cdn.local/pic1.png)\n\n中间\n\n![图二](https://ex.com/pic2.png)\n\n再次出现图一 ![又是图一](https://cdn.local/pic1.png)\n\n结尾',
     renderConfig: { ctaUrl: 'https://lilink.top', noCta: false },
     ...overrides,
   }
@@ -82,7 +88,7 @@ describe('WechatPublisher.publish 链路', () => {
     // 正文图：两张不同图各传一次（pic1.png 重复出现只上传一次）。
     expect(uploadContentImage).toHaveBeenCalledTimes(2)
     const uploadedSrcs = (uploadContentImage as any).mock.calls.map((c: unknown[]) => c[1])
-    expect(uploadedSrcs).toEqual(['pic1.png', 'https://ex.com/pic2.png'])
+    expect(uploadedSrcs).toEqual(['https://cdn.local/pic1.png', 'https://ex.com/pic2.png'])
     // 都带上了 token。
     for (const c of (uploadContentImage as any).mock.calls) {
       expect(c[0]).toBe('TKN')
@@ -120,12 +126,12 @@ describe('WechatPublisher.publish 链路', () => {
 
     // 替换后的 Markdown：原 src 不再出现，替换为 uploadContentImage 返回的微信 URL。
     const md = renderArg.markdown
-    const wxUrl1 = `https://mmbiz.qpic.cn/uploaded/${encodeURIComponent('pic1.png')}.jpg`
+    const wxUrl1 = `https://mmbiz.qpic.cn/uploaded/${encodeURIComponent('https://cdn.local/pic1.png')}.jpg`
     const wxUrl2 = `https://mmbiz.qpic.cn/uploaded/${encodeURIComponent('https://ex.com/pic2.png')}.jpg`
     expect(md).toContain(wxUrl1)
     expect(md).toContain(wxUrl2)
-    // 原始相对路径已被替换掉（不再以 ](pic1.png) 形式出现）。
-    expect(md).not.toContain('](pic1.png)')
+    // 原始图片 src 已被替换掉（不再以 ](原url) 形式出现）。
+    expect(md).not.toContain('](https://cdn.local/pic1.png)')
     expect(md).not.toContain('](https://ex.com/pic2.png)')
     // 重复出现的图一两处都替换成同一个微信 URL。
     const occurrences = md.split(wxUrl1).length - 1
@@ -221,8 +227,9 @@ describe('publishEndpoint 幂等与守卫', () => {
     vi.stubEnv('WX_APP_SECRET', 'SECRET')
   })
 
-  it('幂等：publishResult.stage 已是 draft_created 时直接回包，不调微信、不写库', async () => {
+  it('幂等（三态一致）：status=published + stage=draft_created + 有 mediaId 时直接回包，不调微信、不写库', async () => {
     const doc = makeChannelContent({
+      status: 'published',
       publishResult: { stage: 'draft_created', wxDraftMediaId: 'OLD_MID' },
     })
     const req = makeReq({ doc })
@@ -232,10 +239,34 @@ describe('publishEndpoint 幂等与守卫', () => {
 
     expect(res.status).toBe(200)
     expect(body).toMatchObject({ ok: true, idempotent: true, stage: 'draft_created', draftMediaId: 'OLD_MID' })
-    // 关键：幂等拦截后绝不再调 addDraft（也不调链路其它部分）。
+    // 三态一致＝彻底发完，幂等拦截后绝不再调微信、不写库。
     expect(addDraft).not.toHaveBeenCalled()
     expect(getAccessToken).not.toHaveBeenCalled()
     expect((req.payload.update as any)).not.toHaveBeenCalled()
+  })
+
+  it('局部失败修复：stage=draft_created 但 status 未到 published 时，不重复建草稿，只补状态流转', async () => {
+    // 上次建完草稿后回填/流转中断，状态停在 approved + draft_created。
+    const doc = makeChannelContent({
+      status: 'approved',
+      publishResult: { stage: 'draft_created', wxDraftMediaId: 'OLD_MID' },
+    })
+    const payload = makeMockPayload(doc)
+    const req = makeReq({ doc, payload })
+
+    const res = await publishEndpoint.handler(req as any)
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toMatchObject({ ok: true, idempotent: true, draftMediaId: 'OLD_MID' })
+    // 关键：绝不重复建草稿、不重新取 token。
+    expect(addDraft).not.toHaveBeenCalled()
+    expect(getAccessToken).not.toHaveBeenCalled()
+    // 但补做了到 published 的状态流转（applyTransition → payload.update 写 status）。
+    const statusWrite = (payload.update as any).mock.calls
+      .map((c: any[]) => c[0])
+      .find((d: any) => d?.data?.status === 'published')
+    expect(statusWrite).toBeTruthy()
   })
 
   it('未登录：返回 403，不查库', async () => {
