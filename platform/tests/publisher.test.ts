@@ -315,6 +315,16 @@ describe('WechatPublisher.publish 链路', () => {
     expect(renderMock.mock.calls[0][0]).toBeNull()
   })
 
+  it('preflight 严格 host：换成的图 URL 是 mmbiz 子串域名(evil-mmbiz.qpic.cn)也被拦截', async () => {
+    // 模拟上传返回一个"看起来像 mmbiz 但非真域名"的 URL（子串欺骗）。
+    ;(uploadContentImage as any).mockResolvedValueOnce({ url: 'https://evil-mmbiz.qpic.cn/x.jpg' })
+    const cc = makeChannelContent()
+    await expect(
+      new WechatPublisher().publish({ channelContent: cc, wechat: { appId: 'A', appSecret: 'S' } }),
+    ).rejects.toThrow(/未成功转为微信图片/)
+    expect(addDraft).not.toHaveBeenCalled()
+  })
+
   it('publishers 注册表暴露 wechat 实例', () => {
     expect(publishers.wechat).toBeInstanceOf(WechatPublisher)
     expect(publishers.wechat.platform).toBe('wechat')

@@ -33,7 +33,9 @@ import type { Publisher, PublishInput, PublishResult } from './types'
 // - 已是微信域名(mmbiz.qpic.cn)的图：跳过（此前已上传过，避免重复）。
 function shouldUpload(src: string): boolean {
   if (!/^https?:\/\//i.test(src)) return false
-  if (/^https?:\/\/[^/]*mmbiz\.qpic\.cn/i.test(src)) return false
+  // 严格 host 前缀：只把 mmbiz.qpic.cn 这一精确域名视为"已是微信图"，避免
+  // evil-mmbiz.qpic.cn / evil.com/mmbiz.qpic.cn 这类子串欺骗（codex review High）。
+  if (/^https?:\/\/mmbiz\.qpic\.cn\//i.test(src)) return false
   return true
 }
 
@@ -151,7 +153,7 @@ export class WechatPublisher implements Publisher {
     // 发布前 preflight：正文图必须都是微信域名。若仍有非 mmbiz 的 <img src>，说明该图
     // 未成功上传/换 URL（相对路径/base64/上传失败）——draft/add 会过滤掉它导致掉图，
     // 这里提前阻止并明确报错（codex review High）。
-    const badImg = /<img\b[^>]*\bsrc="(?!https:\/\/[^"]*mmbiz\.qpic\.cn\/)[^">]*"/i.exec(html)
+    const badImg = /<img\b[^>]*\bsrc="(?!https:\/\/mmbiz\.qpic\.cn\/)[^">]*"/i.exec(html)
     if (badImg) {
       throw new Error(
         `正文有图片未成功转为微信图片（会被公众号过滤导致掉图），已阻止发布：${badImg[0].slice(0, 100)}`,

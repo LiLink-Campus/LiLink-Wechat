@@ -254,8 +254,8 @@ const wechatConverters: HTMLConvertersFunction = (): HTMLConverters => {
     // 上传图片 → <figure><img/><figcaption/></figure>；非图片 → 文件名链接。
     upload: ({ node }) => renderUpload(node),
 
-    // 水平分隔线。
-    horizontalrule: () => `<hr style="${STYLE.hr}" />`,
+    // 水平分隔线（与其它块一致，外包一个 <section>）。
+    horizontalrule: () => `<section><hr style="${STYLE.hr}" /></section>`,
 
     // relationship 节点：公众号无对应呈现，忽略（避免输出占位脏数据）。
     relationship: () => '',
@@ -332,7 +332,7 @@ function renderUpload(node: unknown): string {
 // 文末 CTA 胶囊（分隔线 + 居中胶囊；pointer-events:none，仅视觉）。
 function ctaBlock(url: string, text: string): string {
   return (
-    `<hr style="${STYLE.hr}" />` +
+    `<section><hr style="${STYLE.hr}" /></section>` +
     `<section style="${STYLE.ctaWrap}">` +
     `<a href="${escapeAttr(sanitizeHref(url))}" style="${STYLE.cta}">${escapeText(text)}</a>` +
     `</section>`
