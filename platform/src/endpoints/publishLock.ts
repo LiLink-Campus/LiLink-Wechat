@@ -18,6 +18,12 @@
 //   - 释放：只清「lockToken = 自己令牌」的锁，避免慢请求超时被他人抢走后误清新锁。
 //   - 崩溃自愈：进程在持锁中途崩溃来不及释放，锁会在 TTL 后过期、被后续请求重新抢占。
 //
+// 残留窗口（已知限制，第一期可接受）：若进程恰好在「微信 addDraft 成功返回」与
+//   「onDraftCreated 把 stage 写成 draft_created」这两步之间崩溃，则草稿已建但 stage 仍是
+//   none；锁经 TTL 过期后，后续请求会重新抢到并再建一篇草稿。此窗口极小（仅一次 await 之间），
+//   且远好于修复前「双击/重试必重复」；彻底根除需把「建草稿」与「落库」纳入同一事务或两阶段
+//   提交，留待后续。详见 publish.ts onDraftCreated 注释。
+//
 // 列名（已对真实 schema 实测确认）：表 channel_contents；
 //   publish_result_locked_at / publish_result_lock_token / publish_result_stage / status。
 // id 为整数主键，故 SQL 里以 Number(id) 传参（URL 来的 id 是字符串，PG int 列不接受 text）。
