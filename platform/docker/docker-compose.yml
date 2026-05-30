@@ -1,15 +1,18 @@
 # LiLink 平台一体化编排：app(Next.js+Payload) + postgres
 #
 # 用法（在 platform/docker 目录下）：
-#   docker compose up -d --build
+#   docker compose --env-file ../.env up -d --build
 #
 # 说明：
 # - build.context 指向上一级 platform/，dockerfile 用 docker/Dockerfile；
 #   这样 Dockerfile 里的 COPY 以 platform/ 为根（能拿到 package.json、src/、scripts/ 等）。
-# - 机密（PAYLOAD_SECRET / WX_* 等）从 ../.env（即 platform/.env）经 env_file 注入。
+# - 机密（PAYLOAD_SECRET / WX_* / POSTGRES_PASSWORD 等）从 ../.env（即 platform/.env）注入。
+#   注意：env_file 只把变量注入【容器内】，compose 文件里的 ${VAR} 变量替换不读 env_file，
+#   只读 shell 环境或 --env-file 指定的文件——故用法必须带 --env-file ../.env，
+#   否则 ${POSTGRES_PASSWORD} 取不到、compose 直接报错（这是有意为之：杜绝弱默认口令）。
 # - 容器内 DATABASE_URI 必须走 compose 内网服务名 postgres:5432，
 #   而非 .env 里那条本地开发用的 localhost:5433；故在 environment 显式覆盖
-#   （environment 优先级高于 env_file），让容器内连对地址。
+#   （environment 优先级高于 env_file），让容器内连对地址，口令同样取自 POSTGRES_PASSWORD。
 
 services:
   app:
@@ -24,8 +27,16 @@ services:
       - ../.env                # 加载 PAYLOAD_SECRET、WX_* 等机密（platform/.env）
     environment:
       NODE_ENV: production
-      # 覆盖 .env 中的本地开发地址：容器内连 compose 内网的 postgres 服务
-      DATABASE_URI: postgres://lilink:lilink@postgres:5432/lilink
+      # 覆盖 .env 中的本地开发地址：容器内连 compose 内网的 postgres 服务。
+      # 口令取自 POSTGRES_PASSWORD（与下方 postgres 服务同源，需经 --env-file ../.env 提供）。
+      DATABASE_URI: postgres://lilink:${POSTGRES_PASSWORD:?需在 ../.env 设置 POSTGRES_PASSWORD}@postgres:5432/lilink
+    healthcheck:
+      # 用 node 自带 fetch 探活（runner 镜像未装 curl）；/admin 返回即视为就绪。
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/admin').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
     depends_on:
       postgres:
         condition: service_healthy   # 等数据库就绪再启动 app
@@ -37,12 +48,14 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: lilink
-      POSTGRES_PASSWORD: lilink
+      # 口令从环境注入（经 --env-file ../.env）；未设则 compose 报错，杜绝弱默认口令。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?需在 ../.env 设置 POSTGRES_PASSWORD}
       POSTGRES_DB: lilink
-    # 仅映射到宿主 5434，避免与本机已有的 5432/5433 PostgreSQL 冲突；
-    # app 容器是走内网 postgres:5432，不依赖这个宿主端口。
+    # 端口仅绑定宿主回环 127.0.0.1，不暴露到所有网卡——防止 VPS 上数据库被公网直连
+    # （app 容器走内网 postgres:5432，本就不需要这个宿主端口）。
+    # 生产若无需从宿主直连数据库，建议整段删除此 ports 映射，攻击面最小。
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - lilink_pgdata:/var/lib/postgresql/data
     healthcheck:
