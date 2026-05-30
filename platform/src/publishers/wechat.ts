@@ -110,6 +110,9 @@ export class WechatPublisher implements Publisher {
 
   async publish(input: PublishInput): Promise<PublishResult> {
     const { channelContent: cc, wechat, onDraftCreated } = input
+    if (!wechat?.appId || !wechat?.appSecret) {
+      throw new Error('服务端未配置微信凭据（WX_APP_ID / WX_APP_SECRET）')
+    }
 
     // ① 取 access_token（带缓存）。
     const token = await getAccessToken(wechat.appId, wechat.appSecret)
@@ -186,6 +189,6 @@ export class WechatPublisher implements Publisher {
     }
 
     // ⑦ 返回草稿结果。
-    return { draftMediaId: mediaId, stage: 'draft_created' }
+    return { draftMediaId: mediaId, stage: 'draft_created', statusAfterPublish: 'published' }
   }
 }

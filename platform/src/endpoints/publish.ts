@@ -1,4 +1,6 @@
-// 发布 endpoint —— 把一条渠道稿推送到目标平台（第一期：微信公众号建草稿）。
+// 发布 endpoint —— 把一条渠道稿推送到目标平台。
+// - 微信公众号：官方 API 建草稿。
+// - 视频号 / 小红书 / 抖音：生成人工发布包，流转到 ready_to_publish。
 //
 // 挂载方式：作为 channel-contents 集合的自定义 endpoint，
 //   path '/:id/publish'、method 'post' → 实际路由 POST /api/channel-contents/:id/publish。
@@ -6,24 +8,18 @@
 // 逻辑：
 //   1. 鉴权：必须是已登录运营（req.user），否则 401（未登录=无身份）。
 //   2. 取渠道稿（req.payload.findByID）。不存在 → 404。
-//   3. 幂等（三态一致才直接回包）：仅当 stage==='draft_created' 且 wxDraftMediaId 存在
-//      且 status==='published' 三者一致时，才认为「彻底发完」，直接回包既有结果、
-//      不再调微信。若 stage 已是 'draft_created' 但 status 还没到 published（说明上次
-//      建完草稿后回填/状态流转局部失败了），**绝不重复建草稿**（会重复占用素材、
-//      产生重复图文），而是走「幂等修复」：补做到 published 的状态流转（若状态机允许）
-//      后返回成功。
-//   4. 状态校验：只有处于 approved 的稿子能发布（状态机 approved→published）。
+//   3. 幂等：stage 已有平台产物时不重复发布，只补齐缺失状态流转。
+//   4. 状态校验：只有处于 approved 的稿子能发布。
 //      非法则 409，并且不调用微信。
-//   5. 取凭据：process.env.WX_APP_ID / WX_APP_SECRET，缺失 → 500。
-//   6. 调微信前轻量并发自检：再 findByID 二次确认 stage 仍不是 draft_created（也防御性
-//      地排除 publishing），命中则说明已有并发请求建过草稿，转入幂等路径，不重复建。
+//   5. 取凭据：只有 wechat 需要 process.env.WX_APP_ID / WX_APP_SECRET。
+//   6. 调发布器前抢并发锁；没抢到则重读 stage 走幂等或 409。
 //   7. 调 publishers[platform].publish 真正发布。
-//   8. 成功：payload.update 回填 publishResult（wxDraftMediaId / stage / publishedAt），
-//      并经状态机把 status 置 published（applyTransition，写审计）。
+//   8. 成功：回填 publishResult，并经状态机置目标态（published / ready_to_publish）。
 //   9. 失败：把错误信息写进 publishResult.lastError，返回 500。
 
 import { randomUUID } from 'node:crypto'
 import { publishers, type PublisherPlatform } from '../publishers'
+import type { PublishStage } from '../publishers/types'
 import { applyTransition, CHANNEL_CONTENTS_SLUG } from '../workflow/transition'
 import { canTransition, isStatus, type Status } from '../workflow/states'
 import { acquirePublishLock, releasePublishLock } from './publishLock'
@@ -33,22 +29,40 @@ function isSupportedPlatform(p: unknown): p is PublisherPlatform {
   return typeof p === 'string' && p in publishers
 }
 
-// 「草稿已建/正在建」的 stage 取值集合 —— 命中其一即说明微信侧已动过手，
-// 绝不能再调一次 publish（会重复占用素材、产生重复图文）。
-// 第一期 publishResult.stage 类型只有 'draft_created'；'publishing' 是为后续中间态
-// 预留的防御性匹配（新增该取值需改 ChannelContents，归别的任务，这里不引入）。
-const DRAFT_TOUCHED_STAGES = ['draft_created', 'publishing']
-function isDraftTouched(stage: unknown): boolean {
-  return typeof stage === 'string' && DRAFT_TOUCHED_STAGES.includes(stage)
+// 「平台侧已有不可随便重复的产物」的 stage 取值集合：
+// - draft_created：微信草稿已建，重复会产生重复草稿。
+// - manual_ready：人工发布包已生成，重复不危险但应幂等返回，避免覆盖人工检查现场。
+// - publishing：后续中间态预留。
+const PUBLISH_TOUCHED_STAGES = ['draft_created', 'manual_ready', 'publishing']
+function isPublishTouched(stage: unknown): boolean {
+  return typeof stage === 'string' && PUBLISH_TOUCHED_STAGES.includes(stage)
 }
 
-// 幂等回包：草稿已建（无论是否已推到 published），统一回这个形状，标记 idempotent。
-function idempotentResponse(draftMediaId: unknown): Response {
+function statusForStage(stage: unknown): Status {
+  if (stage === 'manual_ready') return 'ready_to_publish'
+  return 'published'
+}
+
+interface PublishResultSnapshot {
+  stage?: unknown
+  wxDraftMediaId?: unknown
+  manualPackage?: unknown
+}
+
+function hasPublishArtifact(publishResult: PublishResultSnapshot | undefined): boolean {
+  if (publishResult?.stage === 'draft_created') return Boolean(publishResult.wxDraftMediaId)
+  if (publishResult?.stage === 'manual_ready') return Boolean(publishResult.manualPackage)
+  return false
+}
+
+// 幂等回包：已有平台产物（微信草稿 / 人工发布包），统一回这个形状，标记 idempotent。
+function idempotentResponse(publishResult: PublishResultSnapshot | undefined): Response {
   return Response.json({
     ok: true,
     idempotent: true,
-    stage: 'draft_created',
-    draftMediaId: draftMediaId ?? null,
+    stage: publishResult?.stage ?? null,
+    draftMediaId: publishResult?.wxDraftMediaId ?? null,
+    manualPackage: publishResult?.manualPackage ?? null,
   })
 }
 
@@ -92,29 +106,33 @@ export const publishEndpoint = {
       return Response.json({ error: `渠道稿不存在：${String(id)}` }, { status: 404 })
     }
 
-    // 3. 幂等 / 局部失败修复：草稿一旦建过（stage 命中 draft_created），就绝不重建。
-    //    - 三态一致（stage=draft_created + wxDraftMediaId 存在 + status=published）：
-    //      彻底发完，直接幂等回包。
-    //    - stage=draft_created 但 status 未到 published：上次建完草稿后回填/流转
-    //      局部失败。**不重复建草稿**，只补做到 published 的状态流转（若状态机允许），
-    //      再幂等返回成功（修复路径）。
-    if (isDraftTouched(cc.publishResult?.stage)) {
-      const existingMediaId = cc.publishResult?.wxDraftMediaId
+    // 3. 幂等 / 局部失败修复：平台产物一旦建过，就绝不重建。
+    //    微信草稿补到 published；人工发布包补到 ready_to_publish。
+    if (isPublishTouched(cc.publishResult?.stage)) {
+      const targetStatus = statusForStage(cc.publishResult?.stage)
       const ccStatus = cc.status
 
       // 三态一致：直接幂等回包。
-      if (ccStatus === 'published' && existingMediaId) {
-        return idempotentResponse(existingMediaId)
+      if (ccStatus === targetStatus && hasPublishArtifact(cc.publishResult)) {
+        return idempotentResponse(cc.publishResult)
       }
 
-      // 局部失败修复：草稿已建但状态没走完，补做状态流转（仅当状态机允许）。
-      // 注意：这里有意不再调微信、不再写 publishResult.stage —— 草稿已存在。
-      if (isStatus(ccStatus) && canTransition(ccStatus, 'published')) {
-        await applyTransition(payload, id, 'published', user.id)
+      if (!hasPublishArtifact(cc.publishResult)) {
+        return Response.json(
+          {
+            error: `发布结果不完整：stage=${String(cc.publishResult?.stage)} 但缺少对应平台产物，请人工检查后重试`,
+          },
+          { status: 409 },
+        )
+      }
+
+      // 局部失败修复：产物已生成但状态没走完，补做状态流转（仅当状态机允许）。
+      if (isStatus(ccStatus) && canTransition(ccStatus, targetStatus)) {
+        await applyTransition(payload, id, targetStatus, user.id)
         // 修复成功后清掉上次失败残留的 lastError（与正常成功路径一致，codex review Low）。
         await clearLastErrorIfAny(payload, id, cc.publishResult?.lastError)
       }
-      return idempotentResponse(existingMediaId)
+      return idempotentResponse(cc.publishResult)
     }
 
     // 平台校验：必须是注册表里支持的平台
@@ -126,23 +144,25 @@ export const publishEndpoint = {
       )
     }
 
-    // 4. 状态校验：只有 approved 能发布（提前拦截，避免建了草稿却卡在状态机）
+    // 4. 状态校验：只有 approved 能发布（提前拦截，避免建了草稿/发布包却卡在状态机）。
+    const expectedTargetStatus: Status = platform === 'wechat' ? 'published' : 'ready_to_publish'
     const current = cc.status as Status
-    if (!isStatus(current) || !canTransition(current, 'published')) {
+    if (!isStatus(current) || !canTransition(current, expectedTargetStatus)) {
       return Response.json(
         {
           error: `当前状态不可发布：${String(current)}（需先经审核进入 approved）`,
           from: current,
-          to: 'published',
+          to: expectedTargetStatus,
         },
         { status: 409 },
       )
     }
 
-    // 5. 取微信凭据
+    // 5. 取平台凭据。只有微信公众号需要服务端 AppID/AppSecret；人工发布包平台
+    //    不需要 key，生成发布包后交给运营在浏览器里确认。
     const appId = process.env.WX_APP_ID
     const appSecret = process.env.WX_APP_SECRET
-    if (!appId || !appSecret) {
+    if (platform === 'wechat' && (!appId || !appSecret)) {
       return Response.json(
         { error: '服务端未配置微信凭据（WX_APP_ID / WX_APP_SECRET）' },
         { status: 500 },
@@ -165,26 +185,34 @@ export const publishEndpoint = {
     if (!gotLock) {
       // 没抢到锁：可能已被并发请求建过草稿（重读看 stage），或正被并发持锁、或状态已变。
       const fresh = await payload.findByID({ collection: CHANNEL_CONTENTS_SLUG, id })
-      // 已建过草稿 → 幂等修复路径（绝不重复建）。
-      if (isDraftTouched(fresh?.publishResult?.stage)) {
-        const freshMediaId = fresh?.publishResult?.wxDraftMediaId
+      // 已有平台产物 → 幂等修复路径（绝不重复建）。
+      if (isPublishTouched(fresh?.publishResult?.stage)) {
+        const targetStatus = statusForStage(fresh?.publishResult?.stage)
+        if (!hasPublishArtifact(fresh?.publishResult)) {
+          return Response.json(
+            {
+              error: `发布结果不完整：stage=${String(fresh?.publishResult?.stage)} 但缺少对应平台产物，请人工检查后重试`,
+            },
+            { status: 409 },
+          )
+        }
         if (
-          fresh?.status !== 'published' &&
+          fresh?.status !== targetStatus &&
           isStatus(fresh?.status) &&
-          canTransition(fresh.status, 'published')
+          canTransition(fresh.status, targetStatus)
         ) {
-          await applyTransition(payload, id, 'published', user.id)
+          await applyTransition(payload, id, targetStatus, user.id)
           // 修复成功后清掉上次失败残留的 lastError（codex review Low）。
           await clearLastErrorIfAny(payload, id, fresh?.publishResult?.lastError)
         }
-        return idempotentResponse(freshMediaId)
+        return idempotentResponse(fresh?.publishResult)
       }
       // 否则：正被并发请求发布中，或状态已变。让调用方稍后刷新重试，不调微信。
       return Response.json(
         {
           error: `稿件正在发布中或状态已变更，请稍后刷新重试：${String(fresh?.status)}`,
           from: fresh?.status,
-          to: 'published',
+          to: expectedTargetStatus,
         },
         { status: 409 },
       )
@@ -207,37 +235,49 @@ export const publishEndpoint = {
       //    已落库的 stage=draft_created 走幂等修复，绝不重复建草稿（review #2）。
       const result = await publishers[platform].publish({
         channelContent: fresh,
-        wechat: { appId, appSecret },
-        onDraftCreated: async (draftMediaId) => {
-          await payload.update({
-            collection: CHANNEL_CONTENTS_SLUG,
-            id,
-            data: { publishResult: { wxDraftMediaId: draftMediaId, stage: 'draft_created' } },
-          })
-        },
+        ...(platform === 'wechat' ? { wechat: { appId: appId!, appSecret: appSecret! } } : {}),
+        ...(platform === 'wechat'
+          ? {
+              onDraftCreated: async (draftMediaId: string) => {
+                await payload.update({
+                  collection: CHANNEL_CONTENTS_SLUG,
+                  id,
+                  data: {
+                    publishResult: { wxDraftMediaId: draftMediaId, stage: 'draft_created' },
+                  },
+                })
+              },
+            }
+          : {}),
       })
 
-      // 8a. 回填完整发布结果（publishedAt；清空上次 lastError）。stage 已由 onDraftCreated 置。
+      const targetStatus = result.statusAfterPublish ?? statusForStage(result.stage)
+      const stage: PublishStage = result.stage
+      const publishResultData: Record<string, unknown> = {
+        stage,
+        lastError: null,
+      }
+      if (result.draftMediaId) publishResultData.wxDraftMediaId = result.draftMediaId
+      if (result.manualPackage) publishResultData.manualPackage = result.manualPackage
+      if (targetStatus === 'published') publishResultData.publishedAt = new Date().toISOString()
+
+      // 8a. 回填完整发布结果。微信写 publishedAt；人工发布包不写 publishedAt，避免误报已发。
       await payload.update({
         collection: CHANNEL_CONTENTS_SLUG,
         id,
         data: {
-          publishResult: {
-            wxDraftMediaId: result.draftMediaId,
-            stage: result.stage,
-            publishedAt: new Date().toISOString(),
-            lastError: null,
-          },
+          publishResult: publishResultData,
         },
       })
 
-      // 8b. 经状态机置 published（写审计；操作人取当前登录用户）
-      await applyTransition(payload, id, 'published', user.id)
+      // 8b. 经状态机置目标态（写审计；操作人取当前登录用户）
+      await applyTransition(payload, id, targetStatus, user.id)
 
       return Response.json({
         ok: true,
         stage: result.stage,
-        draftMediaId: result.draftMediaId,
+        draftMediaId: result.draftMediaId ?? null,
+        manualPackage: result.manualPackage ?? null,
       })
     } catch (err) {
       // 9. 失败：记录 lastError，返回 500。状态不前移，保持可重试。
@@ -257,7 +297,7 @@ export const publishEndpoint = {
       }
       return Response.json({ error: `发布失败：${message}` }, { status: 500 })
     } finally {
-      // 释放锁（仅清本请求令牌的锁，防误清他人新锁）。成功时 stage 已是 draft_created，
+      // 释放锁（仅清本请求令牌的锁，防误清他人新锁）。成功时 stage 已有平台产物，
       // 锁释放后重试会走幂等修复；失败时 stage 仍 none，锁释放后可被重新抢占重试。
       await releasePublishLock(payload, id, lockToken)
     }

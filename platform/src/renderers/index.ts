@@ -1,6 +1,7 @@
 // 渲染器注册表 —— 调用方按平台标识取渲染器，不直接 new 具体类。
 //
-// 第一期只有微信。后续接新平台：实现一个 Renderer，在这里加一行注册即可，调用方无感。
+// 微信有正式 HTML renderer；人工平台的发布包 renderer 从本入口重导出，供 publisher 复用。
+// 后续接新平台：实现一个 Renderer，在这里加一行注册即可，调用方无感。
 
 import { WechatRenderer } from './wechat'
 import type { Renderer } from './types'
@@ -16,3 +17,5 @@ export type RendererPlatform = keyof typeof renderers
 // 重导出类型与具体实现，外部从一个入口拿全。
 export type { Renderer, RenderInput, RenderResult, RenderConfig, Asset } from './types'
 export { WechatRenderer } from './wechat'
+export { buildSocialPackage } from './social-package'
+export type { SocialPublishPackage, SocialAsset, PackageWarning } from './social-package'

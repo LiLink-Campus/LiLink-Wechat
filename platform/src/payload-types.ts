@@ -233,7 +233,7 @@ export interface ChannelContent {
   /**
    * 选平台后会显示该平台专属字段（第一期仅公众号可用）。
    */
-  platform: 'wechat' | 'xiaohongshu' | 'x' | 'douyin' | 'bilibili';
+  platform: 'wechat' | 'weixin_channels' | 'xiaohongshu' | 'x' | 'douyin' | 'bilibili';
   wxTitle?: string | null;
   wxAuthor?: string | null;
   /**
@@ -272,9 +272,46 @@ export interface ChannelContent {
     noCta?: boolean | null;
   };
   /**
+   * 视频号、小红书、抖音先生成人工发布包；后续浏览器自动化也复用这些字段。
+   */
+  contentMode?: ('image_note' | 'video') | null;
+  /**
+   * 按目标平台限制截断并预警：视频号 16 字，小红书 20 字，抖音 30 字。
+   */
+  socialTitle?: string | null;
+  /**
+   * 发布包会拼接正文、话题标签和 LiLink 链接；最终发布前请人工检查语气与导流风险。
+   */
+  socialDescription?: string | null;
+  /**
+   * 不用带 #，系统会生成 #话题；会自动补 LiLink / 校园社交。
+   */
+  socialTags?:
+    | {
+        tag: string;
+        id?: string | null;
+      }[]
+    | null;
+  /**
+   * 图文/笔记模式至少选择一张；顺序即发布包里的上传顺序。
+   */
+  socialImages?: (number | Media)[] | null;
+  /**
+   * 视频模式必填；建议媒体库接云存储，确保发布包能拿到可访问 URL。
+   */
+  videoFile?: (number | null) | Media;
+  /**
+   * 视频号/抖音等平台可能需要横封面，发布包会列出供人工上传。
+   */
+  horizontalCover?: (number | null) | Media;
+  /**
+   * 小红书/抖音视频常用竖封面，建议准备 3:4 或平台推荐比例。
+   */
+  verticalCover?: (number | null) | Media;
+  /**
    * 只能通过「提交/审核/发布」动作流转，不能直接改。
    */
-  status?: ('draft' | 'in_review' | 'approved' | 'published') | null;
+  status?: ('draft' | 'in_review' | 'approved' | 'ready_to_publish' | 'published') | null;
   assignee?: (number | null) | User;
   /**
    * 排版脚本产出的公众号 HTML，只读。
@@ -287,7 +324,16 @@ export interface ChannelContent {
     wxDraftMediaId?: string | null;
     publishedAt?: string | null;
     lastError?: string | null;
-    stage?: ('none' | 'draft_created' | 'mass_sent') | null;
+    stage?: ('none' | 'draft_created' | 'manual_ready' | 'mass_sent') | null;
+    manualPackage?:
+      | {
+          [k: string]: unknown;
+        }
+      | unknown[]
+      | string
+      | number
+      | boolean
+      | null;
     lockedAt?: string | null;
     lockToken?: string | null;
   };
@@ -427,6 +473,19 @@ export interface ChannelContentsSelect<T extends boolean = true> {
         ctaText?: T;
         noCta?: T;
       };
+  contentMode?: T;
+  socialTitle?: T;
+  socialDescription?: T;
+  socialTags?:
+    | T
+    | {
+        tag?: T;
+        id?: T;
+      };
+  socialImages?: T;
+  videoFile?: T;
+  horizontalCover?: T;
+  verticalCover?: T;
   status?: T;
   assignee?: T;
   renderedHtmlPreview?: T;
@@ -437,6 +496,7 @@ export interface ChannelContentsSelect<T extends boolean = true> {
         publishedAt?: T;
         lastError?: T;
         stage?: T;
+        manualPackage?: T;
         lockedAt?: T;
         lockToken?: T;
       };

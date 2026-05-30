@@ -1,7 +1,9 @@
 # LiLink 内容中台 · 第一期（公众号闭环）
 
 自部署的多平台内容发布中台。**第一期**实现：多用户协作 + 媒体库 + 公众号排版 + 公众号官方 API 建草稿发布。
+当前分支在第一期基线上补了视频号 / 小红书 / 抖音的发布包基础设施：先生成可审核、可复制、可交给浏览器自动化消费的人工发布包，不在没有稳定 API 的平台上假装全自动。
 设计与规划见 `../docs/superpowers/specs/2026-05-29-lilink-content-platform-design.md` 与 `../docs/superpowers/plans/2026-05-29-phase1-wechat-content-platform.md`。
+多平台扩展见 `../docs/superpowers/specs/2026-05-31-multiplatform-publishing-infra.md`。
 
 ## 技术栈
 
@@ -32,13 +34,14 @@ npm run dev
 ## 内容模型
 
 - **Posts（选题）**：一个创作单元，含选题名/主题/标签/负责人/共享媒体。
-- **ChannelContents（渠道稿）**：选题在某平台的具体稿件 + 独立状态机。第一期实现 `wechat`，预留 xiaohongshu/x/douyin/bilibili。
+- **ChannelContents（渠道稿）**：选题在某平台的具体稿件 + 独立状态机。已实现 `wechat` 官方 API 草稿链路，并支持 `weixin_channels` / `xiaohongshu` / `douyin` 生成发布包。
 - **Media（媒体库）**：图/音/视频上传（upload collection，生产接云对象存储）。
 - **Users（运营）**：第一期"三人全能"，靠状态流转协作。
 
 ## 协作工作流
 
 渠道稿状态机：`draft → in_review → approved → published`（`in_review → draft` 打回）。
+人工平台多一步：`approved → ready_to_publish → published`，其中 `ready_to_publish` 表示发布包已准备好，但运营还没有在第三方平台完成最终点击。
 - 流转走 `POST /api/channel-contents/:id/transition`（body `{to, reason?}`）。
 - `status`/`publishResult`/`transitionLog` 有字段级 access 保护，只能经 endpoint 流转，不能直接改。
 - 后台列表按 status 分列即为协作队列。
@@ -49,6 +52,17 @@ npm run dev
 封面图 → `material/add_material` 得 thumb_media_id；正文图 → `media/uploadimg` 换微信 URL 并替换 markdown；
 `render.py`（`--no-embed-images`）渲染内联 HTML → `draft/add` 建草稿 → 回填 `publishResult` 并置 `published`。
 **第一期止于建草稿，群发由人在公众号后台点**（最稳、防误发）。幂等：已建草稿不重复建。
+
+## 视频号 / 小红书 / 抖音发布包
+
+`POST /api/channel-contents/:id/publish` 在这三个平台上不要求微信 key，也不会触碰第三方账号。它会：
+
+1. 校验平台标题、正文、话题和必需素材。
+2. 根据 `src/platforms/registry.ts` 选择发布入口与平台限制。
+3. 生成 `publishResult.manualPackage`：标题、正文、话题、素材清单、发布 URL、检查清单、warnings。
+4. 把渠道稿流转到 `ready_to_publish`。
+
+运营在对应平台完成最终发布后，再把渠道稿流转为 `published`。后续 Playwright worker 应直接消费这个 `manualPackage`。
 
 ## 部署（Docker Compose）
 
