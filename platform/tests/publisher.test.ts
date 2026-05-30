@@ -425,6 +425,24 @@ describe('publishEndpoint 幂等与守卫', () => {
     expect(statusWrite).toBeTruthy()
   })
 
+  it('局部失败修复：清掉上次残留的 lastError（修复成功后不应再显示陈旧错误）', async () => {
+    // 上次建完草稿后流转失败并写了 lastError；本次修复补流转到 published 后应清空它。
+    const doc = makeChannelContent({
+      status: 'approved',
+      publishResult: { stage: 'draft_created', wxDraftMediaId: 'OLD_MID', lastError: '上次流转失败' },
+    })
+    const payload = makeMockPayload(doc)
+    const req = makeReq({ doc, payload })
+
+    const res = await publishEndpoint.handler(req as any)
+    expect(res.status).toBe(200)
+    // 修复路径应写一次 publishResult.lastError = null（清掉陈旧错误）。
+    const clearWrite = (payload.update as any).mock.calls
+      .map((c: any[]) => c[0])
+      .find((d: any) => d?.data?.publishResult?.lastError === null)
+    expect(clearWrite).toBeTruthy()
+  })
+
   it('未登录：返回 401，不查库', async () => {
     const req = makeReq({ doc: makeChannelContent(), user: null })
     const res = await publishEndpoint.handler(req as any)

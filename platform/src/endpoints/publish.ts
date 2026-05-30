@@ -52,6 +52,21 @@ function idempotentResponse(draftMediaId: unknown): Response {
   })
 }
 
+// 修复路径成功流转到 published 后，清掉上次局部失败残留的 lastError（仅当确有 lastError 才写库），
+// 与正常成功路径（写 lastError:null）一致，避免已发布的稿子在后台仍显示陈旧错误（codex review Low）。
+async function clearLastErrorIfAny(payload: any, id: unknown, lastError: unknown): Promise<void> {
+  if (!lastError) return
+  try {
+    await payload.update({
+      collection: CHANNEL_CONTENTS_SLUG,
+      id,
+      data: { publishResult: { lastError: null } },
+    })
+  } catch {
+    // 清 lastError 失败不影响修复结果（状态已成功流转），吞掉即可。
+  }
+}
+
 // 自定义 endpoint 配置对象。导出后由 payload.config.ts 挂到 ChannelContents.endpoints。
 // 用宽松类型（不强依赖 Payload 的 Endpoint 类型）以避免跨任务阶段的类型耦合；
 // 形状与 Payload 3.x collection endpoint 约定一致（path/method/handler(req)=>Response）。
@@ -96,6 +111,8 @@ export const publishEndpoint = {
       // 注意：这里有意不再调微信、不再写 publishResult.stage —— 草稿已存在。
       if (isStatus(ccStatus) && canTransition(ccStatus, 'published')) {
         await applyTransition(payload, id, 'published', user.id)
+        // 修复成功后清掉上次失败残留的 lastError（与正常成功路径一致，codex review Low）。
+        await clearLastErrorIfAny(payload, id, cc.publishResult?.lastError)
       }
       return idempotentResponse(existingMediaId)
     }
@@ -157,6 +174,8 @@ export const publishEndpoint = {
           canTransition(fresh.status, 'published')
         ) {
           await applyTransition(payload, id, 'published', user.id)
+          // 修复成功后清掉上次失败残留的 lastError（codex review Low）。
+          await clearLastErrorIfAny(payload, id, fresh?.publishResult?.lastError)
         }
         return idempotentResponse(freshMediaId)
       }
