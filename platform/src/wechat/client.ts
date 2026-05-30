@@ -128,6 +128,22 @@ function isBlockedHost(hostnameRaw: string): boolean {
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024 // 10MB 上限，防超大响应耗内存。
 const FETCH_TIMEOUT_MS = 10_000
 
+// 微信 API 调用超时：30s。远小于发布锁 TTL（见 endpoints/publishLock，默认 10min），故正常发布
+// 不会因单次接口慢触发锁误判过期；微信侧无响应时也不会无限挂起（abort 抛错→上层释放锁、可重试）。
+const WX_API_TIMEOUT_MS = 30_000
+
+// 给微信 API 的 POST fetch 包一层显式超时（AbortController）。三个上传/草稿接口共用，避免微信
+// 无响应时请求永久挂起、长时间占住发布锁（codex review High：发布链路 fetch 须有超时且 < 锁 TTL）。
+async function wxFetch(url: URL, init: RequestInit): Promise<Response> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), WX_API_TIMEOUT_MS)
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 // 安全地把图片 URL 取成 Buffer：限协议 + 拦内网 + 禁重定向 + 超时 + 大小上限 + Content-Type 校验。
 async function fetchImageBuffer(rawUrl: string): Promise<{ buf: Buffer; filename: string }> {
   const u = new URL(rawUrl)
@@ -204,7 +220,7 @@ export async function uploadContentImage(token: string, file: WxFileInput): Prom
   const url = new URL('https://api.weixin.qq.com/cgi-bin/media/uploadimg')
   url.searchParams.set('access_token', token)
 
-  const res = await fetch(url, { method: 'POST', body: form })
+  const res = await wxFetch(url, { method: 'POST', body: form })
   const data = (await res.json()) as WxUploadImgResponse
 
   if (data.errcode) {
@@ -235,7 +251,7 @@ export async function addPermanentImage(
   // type 走 query，固定 image。
   url.searchParams.set('type', 'image')
 
-  const res = await fetch(url, { method: 'POST', body: form })
+  const res = await wxFetch(url, { method: 'POST', body: form })
   const data = (await res.json()) as WxAddMaterialResponse
 
   if (data.errcode) {
@@ -258,7 +274,7 @@ export async function addDraft(token: string, article: DraftArticle): Promise<{ 
   const url = new URL('https://api.weixin.qq.com/cgi-bin/draft/add')
   url.searchParams.set('access_token', token)
 
-  const res = await fetch(url, {
+  const res = await wxFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     // 微信对中文不接受被 ASCII 转义？实际接受 UTF-8 JSON，这里正常 stringify 即可。
