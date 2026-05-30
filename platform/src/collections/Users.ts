@@ -66,10 +66,29 @@ export const Users: CollectionConfig = {
       ({ data, req, originalDoc, operation }) => {
         if (operation !== 'create' && operation !== 'update') return data
         if (!data || data.role === undefined) return data
+        // 未登录能走到这里只可能是首用户 create（registerFirstUser，overrideAccess）；其余未登录
+        // 写已被 collection access 挡下。首用户角色由下方 beforeChange 的 bootstrap 提权统一处理，
+        // 这里不拦，避免误伤首次安装。
+        if (!req.user) return data
         if (isAdmin(req.user as AccessUser)) return data
         const prevRole = originalDoc?.role ?? 'operator'
         if (data.role !== prevRole) {
           throw new Error('无权修改账号角色：仅管理员可变更 role')
+        }
+        return data
+      },
+    ],
+    beforeChange: [
+      // 首用户 bootstrap 提权（codex review High）：Payload registerFirstUser 在「库中无任何用户」
+      // 时允许未登录创建首账号（绕过 create access），但其 role 默认 operator；而本集合 create 已
+      // 收敛为 admin-only —— 若首用户非 admin，此后将无任何 admin 能再建账号，账号管理彻底锁死。
+      // 故创建「第一个用户」时强制 role=admin。库中已有用户后该分支不再触发（不影响后续建号）。
+      async ({ data, req, operation }) => {
+        if (operation === 'create') {
+          const { totalDocs } = await req.payload.count({ collection: 'users', req })
+          if (totalDocs === 0) {
+            return { ...data, role: 'admin' }
+          }
         }
         return data
       },
