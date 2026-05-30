@@ -156,7 +156,7 @@ export interface Post {
   createdAt: string;
 }
 /**
- * 团队运营成员账号。第一期三人全能、权限不细分，靠「渠道稿」的状态流转来协作。
+ * 团队运营成员账号。第一期三人全能、业务权限不细分；账号与角色管理限管理员。
  *
  * This interface was referenced by `Config`'s JSON-Schema
  * via the `definition` "users".
@@ -288,6 +288,8 @@ export interface ChannelContent {
     publishedAt?: string | null;
     lastError?: string | null;
     stage?: ('none' | 'draft_created' | 'mass_sent') | null;
+    lockedAt?: string | null;
+    lockToken?: string | null;
   };
   /**
    * 状态流转审计记录（系统自动写入）。
@@ -435,6 +437,8 @@ export interface ChannelContentsSelect<T extends boolean = true> {
         publishedAt?: T;
         lastError?: T;
         stage?: T;
+        lockedAt?: T;
+        lockToken?: T;
       };
   transitionLog?: T;
   updatedAt?: T;
