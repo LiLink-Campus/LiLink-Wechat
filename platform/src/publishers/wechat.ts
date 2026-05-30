@@ -109,7 +109,7 @@ export class WechatPublisher implements Publisher {
   readonly platform = 'wechat'
 
   async publish(input: PublishInput): Promise<PublishResult> {
-    const { channelContent: cc, wechat } = input
+    const { channelContent: cc, wechat, onDraftCreated } = input
 
     // ① 取 access_token（带缓存）。
     const token = await getAccessToken(wechat.appId, wechat.appSecret)
@@ -177,6 +177,13 @@ export class WechatPublisher implements Publisher {
 
     // ⑥ 建草稿。
     const { mediaId } = await addDraft(token, article)
+
+    // ⑥' 草稿已在微信侧建成 —— 立刻回调让 endpoint 把 draftMediaId 落库。
+    //    必须在返回前 await：若回调（写库）失败则整篇 publish 失败、走 endpoint catch 释放锁；
+    //    但此时草稿已建、id 已尽力持久化，重试会走幂等修复而非重复建草稿。
+    if (onDraftCreated) {
+      await onDraftCreated(mediaId)
+    }
 
     // ⑦ 返回草稿结果。
     return { draftMediaId: mediaId, stage: 'draft_created' }

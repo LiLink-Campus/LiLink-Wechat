@@ -229,6 +229,21 @@ export const ChannelContents: CollectionConfig = {
             { label: '已群发', value: 'mass_sent' },
           ],
         },
+        {
+          // 发布并发软锁时间戳：发布开始时置 now，结束/失败时由持有者清空。
+          // 配合 lockToken 实现原子 CAS 抢锁（见 endpoints/publishLock.ts），防并发重复建草稿。
+          // 崩溃遗留的锁会在 TTL（默认 10min）后被判定过期、可被后续请求重抢。
+          name: 'lockedAt',
+          label: '发布锁时间',
+          type: 'date',
+        },
+        {
+          // 发布锁持有者令牌（每次发布生成的随机 UUID）。释放锁时仅清「令牌一致」的锁，
+          // 避免慢请求超时被他人抢走后又误清掉新持有者的锁。
+          name: 'lockToken',
+          label: '发布锁令牌',
+          type: 'text',
+        },
       ],
     },
     {

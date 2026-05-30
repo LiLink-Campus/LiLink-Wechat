@@ -22,9 +22,11 @@
 //      并经状态机把 status 置 published（applyTransition，写审计）。
 //   9. 失败：把错误信息写进 publishResult.lastError，返回 500。
 
+import { randomUUID } from 'node:crypto'
 import { publishers, type PublisherPlatform } from '../publishers'
 import { applyTransition, CHANNEL_CONTENTS_SLUG } from '../workflow/transition'
 import { canTransition, isStatus, type Status } from '../workflow/states'
+import { acquirePublishLock, releasePublishLock } from './publishLock'
 
 // publishers 注册表里已支持的平台集合，用于运行时校验 platform 字段。
 function isSupportedPlatform(p: unknown): p is PublisherPlatform {
@@ -130,39 +132,50 @@ export const publishEndpoint = {
       )
     }
 
+    // 6. 原子抢锁（真正的并发保护）：基于 Postgres 单条条件 UPDATE 的 CAS，
+    //    仅当 status=approved 且 stage 仍 none 且（未锁/锁过期）才置锁成功。
+    //    并发的多个 publish 请求里只有一个能抢到锁，其余转幂等/409，不重复建草稿。
+    //    （取代旧的「乐观双检」——那只缩小窗口、非原子，双击/重试仍会双发。）
+    const lockToken = randomUUID()
+    let gotLock = false
     try {
-      // 6. 调微信前的轻量并发自检（乐观双检）：
-      //    第一期 3 人低并发，不引入新字段 / 不改 ChannelContents / 不用 DB 事务。
-      //    重新 findByID 取最新快照 fresh，既防并发建草稿，也防首次读(cc)后状态被并发改动。
-      //    说明：这只是缩小竞态窗口的最佳努力，**并非原子锁**——两个请求若在本次 findByID
-      //    与下面 publish 之间几乎同时穿过，仍可能双发。完整原子保护（DB 事务 / 基于 stage
-      //    的条件 CAS 更新）留后续任务，第一期低并发下此双检足够降低重复概率。
-      const fresh = await payload.findByID({ collection: CHANNEL_CONTENTS_SLUG, id })
+      gotLock = await acquirePublishLock(payload, id, lockToken)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return Response.json({ error: `发布失败（并发锁不可用）：${message}` }, { status: 500 })
+    }
 
-      // 6a. 已被并发请求建过草稿 → 转幂等路径，绝不重复建。
+    if (!gotLock) {
+      // 没抢到锁：可能已被并发请求建过草稿（重读看 stage），或正被并发持锁、或状态已变。
+      const fresh = await payload.findByID({ collection: CHANNEL_CONTENTS_SLUG, id })
+      // 已建过草稿 → 幂等修复路径（绝不重复建）。
       if (isDraftTouched(fresh?.publishResult?.stage)) {
         const freshMediaId = fresh?.publishResult?.wxDraftMediaId
-        if (fresh?.status !== 'published' && isStatus(fresh?.status) && canTransition(fresh.status, 'published')) {
+        if (
+          fresh?.status !== 'published' &&
+          isStatus(fresh?.status) &&
+          canTransition(fresh.status, 'published')
+        ) {
           await applyTransition(payload, id, 'published', user.id)
         }
         return idempotentResponse(freshMediaId)
       }
+      // 否则：正被并发请求发布中，或状态已变。让调用方稍后刷新重试，不调微信。
+      return Response.json(
+        {
+          error: `稿件正在发布中或状态已变更，请稍后刷新重试：${String(fresh?.status)}`,
+          from: fresh?.status,
+          to: 'published',
+        },
+        { status: 409 },
+      )
+    }
 
-      // 6b. 用最新 status 再次校验仍可发布——防首次读(cc)之后状态被并发改成 in_review/draft
-      //     等不可发布态时，仍基于过期的 cc 误建草稿。状态已变则 409、不调微信。
-      const freshStatus = fresh?.status
-      if (!isStatus(freshStatus) || !canTransition(freshStatus, 'published')) {
-        return Response.json(
-          {
-            error: `状态已变更，当前不可发布：${String(freshStatus)}（请刷新后重试）`,
-            from: freshStatus,
-            to: 'published',
-          },
-          { status: 409 },
-        )
-      }
-
-      // 6c. 平台也以最新快照为准（两次读之间理论上可能被改），且须与首次校验过的 platform 一致。
+    // 抢到锁。自此任何返回路径都必须经 finally 释放锁（仅清本请求令牌的锁）。
+    try {
+      // 6'. 抢锁后重读最新快照：首读(cc)→抢锁之间可能被改（如 platform）。基于 fresh 发布。
+      //     status/stage 已由锁的 WHERE 条件原子保证（approved + none），这里再校验 platform。
+      const fresh = await payload.findByID({ collection: CHANNEL_CONTENTS_SLUG, id })
       if (!isSupportedPlatform(fresh?.platform) || fresh.platform !== platform) {
         return Response.json(
           { error: `发布平台已变更或不受支持：${String(fresh?.platform)}` },
@@ -170,13 +183,22 @@ export const publishEndpoint = {
         )
       }
 
-      // 7. 真正发布（用最新快照 fresh，避免基于过期的 cc 发布）。
+      // 7. 真正发布。onDraftCreated 在草稿建成的瞬间把 draftMediaId + stage 落库——
+      //    使「草稿已建」状态可恢复：即便随后回填/状态流转失败或进程崩溃，重试也能凭
+      //    已落库的 stage=draft_created 走幂等修复，绝不重复建草稿（review #2）。
       const result = await publishers[platform].publish({
         channelContent: fresh,
         wechat: { appId, appSecret },
+        onDraftCreated: async (draftMediaId) => {
+          await payload.update({
+            collection: CHANNEL_CONTENTS_SLUG,
+            id,
+            data: { publishResult: { wxDraftMediaId: draftMediaId, stage: 'draft_created' } },
+          })
+        },
       })
 
-      // 8a. 回填发布结果（清空上次 lastError）
+      // 8a. 回填完整发布结果（publishedAt；清空上次 lastError）。stage 已由 onDraftCreated 置。
       await payload.update({
         collection: CHANNEL_CONTENTS_SLUG,
         id,
@@ -215,6 +237,10 @@ export const publishEndpoint = {
         // 回填 lastError 本身失败不应淹没原始错误，吞掉即可。
       }
       return Response.json({ error: `发布失败：${message}` }, { status: 500 })
+    } finally {
+      // 释放锁（仅清本请求令牌的锁，防误清他人新锁）。成功时 stage 已是 draft_created，
+      // 锁释放后重试会走幂等修复；失败时 stage 仍 none，锁释放后可被重新抢占重试。
+      await releasePublishLock(payload, id, lockToken)
     }
   },
 }

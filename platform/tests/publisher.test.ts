@@ -346,14 +346,23 @@ describe('WechatPublisher.publish 链路', () => {
 // ===== endpoint 层：幂等拦截 / 鉴权 / 状态校验 / 成功回填 =====
 
 // 构造一个最小 mock payload：findByID 返回给定文档，update 记录调用。
-function makeMockPayload(doc: Record<string, unknown> | null) {
+// db.drizzle.execute mock 供发布并发锁（acquirePublishLock/releasePublishLock）使用：
+//   - 默认返回 [{ id: 1 }]（非空）→ 抢锁成功，让走发布主流程的用例能穿过锁。
+//   - 传 lockWon:false → execute 返回 []（空）→ 模拟「没抢到锁」（并发/已被持有）。
+// 注意：锁的真原子性由 tests/publish-lock.test.ts 在真实 Postgres 上验证；这里只用可控
+// mock 覆盖 endpoint 在「抢到/没抢到」两种结果下的分支逻辑。
+function makeMockPayload(doc: Record<string, unknown> | null, opts: { lockWon?: boolean } = {}) {
+  const lockWon = opts.lockWon ?? true
+  const execute = vi.fn().mockResolvedValue(lockWon ? [{ id: 1 }] : [])
   return {
     findByID: vi.fn().mockResolvedValue(doc),
     update: vi.fn().mockResolvedValue(doc ?? {}),
+    db: { drizzle: { execute } },
   }
 }
 
 // 构造一个 endpoint req：带 payload / user / routeParams。
+// 默认 id 用数字字符串 '1'：发布锁对 id 做 Number() 校验（PG 整数主键），非数字会被拒。
 function makeReq(opts: {
   doc: Record<string, unknown> | null
   user?: unknown
@@ -364,7 +373,7 @@ function makeReq(opts: {
   return {
     payload,
     user: opts.user === undefined ? { id: 'user-1' } : opts.user,
-    routeParams: { id: opts.id ?? 'cc1' },
+    routeParams: { id: opts.id ?? '1' },
   }
 }
 
@@ -488,5 +497,67 @@ describe('publishEndpoint 幂等与守卫', () => {
     // 失败时不应把 status 置 published。
     const statusWrite = updateCalls.find((d: any) => d?.data?.status === 'published')
     expect(statusWrite).toBeFalsy()
+  })
+
+  it('没抢到并发锁（稿件仍未建草稿）：返回 409，不调微信、不重复建草稿', async () => {
+    // 模拟并发：本请求抢锁失败（execute 返回空），且稿件 stage 仍 none（并发者尚未建成）。
+    const doc = makeChannelContent({ status: 'approved' })
+    const payload = makeMockPayload(doc, { lockWon: false })
+    const req = makeReq({ doc, payload })
+
+    const res = await publishEndpoint.handler(req as any)
+    expect(res.status).toBe(409)
+    // 没抢到锁 → 绝不进入发布链路。
+    expect(getAccessToken).not.toHaveBeenCalled()
+    expect(addDraft).not.toHaveBeenCalled()
+  })
+
+  it('没抢到并发锁但并发请求已建草稿：幂等回包，绝不重复建草稿', async () => {
+    // 初读 stage=none（不触发早期幂等）→ 抢锁失败 → 重读 fresh 显示并发者已建草稿。
+    const cc = makeChannelContent({ status: 'approved' })
+    const fresh = makeChannelContent({
+      status: 'approved',
+      publishResult: { stage: 'draft_created', wxDraftMediaId: 'CONC_MID' },
+    })
+    const payload = makeMockPayload(cc, { lockWon: false })
+    ;(payload.findByID as any).mockResolvedValueOnce(cc).mockResolvedValueOnce(fresh)
+    const req = makeReq({ doc: cc, payload })
+
+    const res = await publishEndpoint.handler(req as any)
+    const body = await res.json()
+    expect(res.status).toBe(200)
+    expect(body).toMatchObject({ ok: true, idempotent: true, draftMediaId: 'CONC_MID' })
+    // 关键：并发者已建草稿，本请求绝不重复建。
+    expect(addDraft).not.toHaveBeenCalled()
+  })
+
+  it('onDraftCreated：草稿建成即把 draftMediaId 落库（可恢复，先于含 publishedAt 的完整回填）', async () => {
+    const doc = makeChannelContent({ status: 'approved' })
+    const payload = makeMockPayload(doc)
+    const req = makeReq({ doc, payload })
+
+    const res = await publishEndpoint.handler(req as any)
+    expect(res.status).toBe(200)
+
+    const updateCalls = (payload.update as any).mock.calls.map((c: any[]) => c[0])
+    // 即时持久化写：含 wxDraftMediaId + stage=draft_created，但无 publishedAt
+    //（区别于随后含 publishedAt 的完整回填）——证明草稿 id 在建成瞬间已单独落库（review #2 可恢复）。
+    const immediate = updateCalls.find(
+      (d: any) =>
+        d?.data?.publishResult?.wxDraftMediaId === 'DRAFT_MID' &&
+        d?.data?.publishResult?.stage === 'draft_created' &&
+        d?.data?.publishResult?.publishedAt === undefined,
+    )
+    expect(immediate).toBeTruthy()
+  })
+
+  it('成功发布后释放锁：drizzle execute 至少被调用两次（抢锁 + 释放）', async () => {
+    const doc = makeChannelContent({ status: 'approved' })
+    const payload = makeMockPayload(doc)
+    const req = makeReq({ doc, payload })
+
+    await publishEndpoint.handler(req as any)
+    // acquirePublishLock 一次 + finally 里 releasePublishLock 一次。
+    expect((payload.db.drizzle.execute as any).mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 })

@@ -16,6 +16,11 @@
 export interface PublishInput {
   channelContent: any
   wechat: { appId: string; appSecret: string }
+  // 草稿一旦在平台侧建成（拿到 draftMediaId）即回调，让 endpoint 立刻把 id 落库。
+  // 目的：草稿建成与「写库」之间若进程崩溃/DB 瞬断，重试能凭已落库的 draftMediaId
+  // 走幂等修复、不重复建草稿（见 endpoints/publish.ts 的可恢复设计）。
+  // 回调抛错应让整个 publish 失败（走 endpoint 的 catch 释放锁），因为 draftId 未能持久化。
+  onDraftCreated?: (draftMediaId: string) => Promise<void>
 }
 
 // 一次发布的产物。
