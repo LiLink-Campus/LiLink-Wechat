@@ -23,9 +23,15 @@ describe('states.canTransition', () => {
     expect(canTransition('in_review', 'draft')).toBe(true)
   })
 
-  it('允许 approved → published（发布）与 approved → in_review（退回重审）', () => {
+  it('允许 approved → published（官方发布）、ready_to_publish（人工发布包）与 in_review（退回重审）', () => {
     expect(canTransition('approved', 'published')).toBe(true)
+    expect(canTransition('approved', 'ready_to_publish')).toBe(true)
     expect(canTransition('approved', 'in_review')).toBe(true)
+  })
+
+  it('允许 ready_to_publish → published（人工确认已发）与 ready_to_publish → in_review（退回重审）', () => {
+    expect(canTransition('ready_to_publish', 'published')).toBe(true)
+    expect(canTransition('ready_to_publish', 'in_review')).toBe(true)
   })
 
   it('拒绝非法流转 draft → published', () => {
@@ -51,6 +57,7 @@ describe('states.canTransition', () => {
 describe('states.isStatus', () => {
   it('识别合法状态值', () => {
     expect(isStatus('draft')).toBe(true)
+    expect(isStatus('ready_to_publish')).toBe(true)
     expect(isStatus('published')).toBe(true)
   })
 

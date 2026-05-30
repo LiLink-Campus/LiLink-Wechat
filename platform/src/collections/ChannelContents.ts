@@ -14,8 +14,12 @@ import {
   ParagraphFeature,
 } from '@payloadcms/richtext-lexical'
 
+const MANUAL_PUBLISH_PLATFORMS = ['weixin_channels', 'xiaohongshu', 'douyin']
+const isManualPublishPlatform = (data?: Record<string, unknown>) =>
+  MANUAL_PUBLISH_PLATFORMS.includes(String(data?.platform ?? ''))
+
 // 渠道稿（ChannelContent）：一个选题在某个平台上的具体可发布内容 + 流转状态。
-// 第一期重点是公众号（wechat），公众号专属字段通过 admin.condition 仅在 platform==='wechat' 时显示。
+// 公众号（wechat）字段与人工平台（视频号/小红书/抖音）字段通过 admin.condition 分开显示。
 // status / renderedHtmlPreview / publishResult / transitionLog 由发布流水线写入，对运营只读，
 // 且加字段级 access 拒绝经 API 直接改（只能走 transition/publish endpoint）。
 export const ChannelContents: CollectionConfig = {
@@ -48,6 +52,7 @@ export const ChannelContents: CollectionConfig = {
       defaultValue: 'wechat',
       options: [
         { label: '微信公众号', value: 'wechat' },
+        { label: '视频号', value: 'weixin_channels' },
         { label: '小红书', value: 'xiaohongshu' },
         { label: 'X', value: 'x' },
         { label: '抖音', value: 'douyin' },
@@ -166,6 +171,98 @@ export const ChannelContents: CollectionConfig = {
       ],
     },
 
+    // ===== 视频号 / 小红书 / 抖音共用字段（生成人工发布包）=====
+    {
+      name: 'contentMode',
+      label: '内容形态',
+      type: 'select',
+      defaultValue: 'image_note',
+      options: [
+        { label: '图文/笔记', value: 'image_note' },
+        { label: '视频', value: 'video' },
+      ],
+      admin: {
+        condition: isManualPublishPlatform,
+        description: '视频号、小红书、抖音先生成人工发布包；后续浏览器自动化也复用这些字段。',
+      },
+    },
+    {
+      name: 'socialTitle',
+      label: '平台标题',
+      type: 'text',
+      admin: {
+        condition: isManualPublishPlatform,
+        description: '按目标平台限制截断并预警：视频号 16 字，小红书 20 字，抖音 30 字。',
+      },
+    },
+    {
+      name: 'socialDescription',
+      label: '平台正文/描述',
+      type: 'textarea',
+      admin: {
+        condition: isManualPublishPlatform,
+        description: '发布包会拼接正文、话题标签和 LiLink 链接；最终发布前请人工检查语气与导流风险。',
+      },
+    },
+    {
+      name: 'socialTags',
+      label: '平台话题',
+      type: 'array',
+      admin: {
+        condition: isManualPublishPlatform,
+        description: '不用带 #，系统会生成 #话题；会自动补 LiLink / 校园社交。',
+      },
+      fields: [
+        {
+          name: 'tag',
+          label: '话题',
+          type: 'text',
+          required: true,
+        },
+      ],
+    },
+    {
+      name: 'socialImages',
+      label: '图文图片',
+      type: 'relationship',
+      relationTo: 'media',
+      hasMany: true,
+      admin: {
+        condition: isManualPublishPlatform,
+        description: '图文/笔记模式至少选择一张；顺序即发布包里的上传顺序。',
+      },
+    },
+    {
+      name: 'videoFile',
+      label: '视频文件',
+      type: 'relationship',
+      relationTo: 'media',
+      admin: {
+        condition: isManualPublishPlatform,
+        description: '视频模式必填；建议媒体库接云存储，确保发布包能拿到可访问 URL。',
+      },
+    },
+    {
+      name: 'horizontalCover',
+      label: '横封面',
+      type: 'relationship',
+      relationTo: 'media',
+      admin: {
+        condition: isManualPublishPlatform,
+        description: '视频号/抖音等平台可能需要横封面，发布包会列出供人工上传。',
+      },
+    },
+    {
+      name: 'verticalCover',
+      label: '竖封面',
+      type: 'relationship',
+      relationTo: 'media',
+      admin: {
+        condition: isManualPublishPlatform,
+        description: '小红书/抖音视频常用竖封面，建议准备 3:4 或平台推荐比例。',
+      },
+    },
+
     // ===== 流转 / 流水线状态（与平台无关）=====
     {
       name: 'status',
@@ -181,6 +278,7 @@ export const ChannelContents: CollectionConfig = {
         { label: '草稿', value: 'draft' },
         { label: '待审核', value: 'in_review' },
         { label: '已批准', value: 'approved' },
+        { label: '待人工发布', value: 'ready_to_publish' },
         { label: '已发布', value: 'published' },
       ],
     },
@@ -226,8 +324,14 @@ export const ChannelContents: CollectionConfig = {
           options: [
             { label: '未开始', value: 'none' },
             { label: '已建草稿', value: 'draft_created' },
+            { label: '人工发布包已准备', value: 'manual_ready' },
             { label: '已群发', value: 'mass_sent' },
           ],
+        },
+        {
+          name: 'manualPackage',
+          label: '人工发布包',
+          type: 'json',
         },
         {
           // 发布并发软锁时间戳：发布开始时置 now，结束/失败时由持有者清空。

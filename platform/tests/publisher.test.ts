@@ -179,7 +179,11 @@ describe('WechatPublisher.publish 链路', () => {
     })
 
     // 返回值符合 PublishResult 约定。
-    expect(result).toEqual({ draftMediaId: 'DRAFT_MID', stage: 'draft_created' })
+    expect(result).toEqual({
+      draftMediaId: 'DRAFT_MID',
+      stage: 'draft_created',
+      statusAfterPublish: 'published',
+    })
 
     // 链路起点：用注入的凭据取 token。
     expect(getAccessToken).toHaveBeenCalledWith('APPID', 'SECRET')
@@ -499,6 +503,86 @@ describe('publishEndpoint 幂等与守卫', () => {
 
     const statusWrite = updateCalls.find((d: any) => d?.data?.status === 'published')
     expect(statusWrite).toBeTruthy()
+  })
+
+  it('人工平台成功路径：不要求微信凭据，回填 manualPackage，并把状态置为 ready_to_publish', async () => {
+    vi.stubEnv('WX_APP_ID', '')
+    vi.stubEnv('WX_APP_SECRET', '')
+    const doc = makeChannelContent({
+      platform: 'xiaohongshu',
+      status: 'approved',
+      contentMode: 'image_note',
+      socialTitle: 'LiLink 小红书笔记',
+      socialDescription: '这是一条准备人工发布的小红书正文。',
+      socialTags: [{ tag: 'LiLink攻略' }],
+      socialImages: [
+        { id: 'img-1', url: 'https://cdn.lilink.top/xhs.png', mimeType: 'image/png', filename: 'xhs.png' },
+      ],
+      publishResult: { stage: 'none' },
+    })
+    const payload = makeMockPayload(doc)
+    const req = makeReq({ doc, payload })
+
+    const res = await publishEndpoint.handler(req as any)
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.stage).toBe('manual_ready')
+    expect(body.draftMediaId).toBeNull()
+    expect(body.manualPackage).toMatchObject({
+      platform: 'xiaohongshu',
+      title: 'LiLink 小红书笔记',
+    })
+    expect(getAccessToken).not.toHaveBeenCalled()
+    expect(addDraft).not.toHaveBeenCalled()
+
+    const updateCalls = (payload.update as any).mock.calls.map((c: any[]) => c[0])
+    const resultWrite = updateCalls.find((d: any) => d?.data?.publishResult?.manualPackage)
+    expect(resultWrite.data.publishResult.stage).toBe('manual_ready')
+    expect(resultWrite.data.publishResult.publishedAt).toBeUndefined()
+
+    const statusWrite = updateCalls.find((d: any) => d?.data?.status === 'ready_to_publish')
+    expect(statusWrite).toBeTruthy()
+  })
+
+  it('人工平台幂等：manual_ready + ready_to_publish 直接返回发布包，不重复生成/写库', async () => {
+    const doc = makeChannelContent({
+      platform: 'douyin',
+      status: 'ready_to_publish',
+      publishResult: {
+        stage: 'manual_ready',
+        manualPackage: { platform: 'douyin', title: '已准备' },
+      },
+    })
+    const req = makeReq({ doc })
+
+    const res = await publishEndpoint.handler(req as any)
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toMatchObject({
+      ok: true,
+      idempotent: true,
+      stage: 'manual_ready',
+      manualPackage: { platform: 'douyin', title: '已准备' },
+    })
+    expect((req.payload.update as any)).not.toHaveBeenCalled()
+  })
+
+  it('幂等防御：stage 已完成但缺少对应平台产物时返回 409，不误报成功', async () => {
+    const doc = makeChannelContent({
+      status: 'published',
+      publishResult: { stage: 'draft_created' },
+    })
+    const req = makeReq({ doc })
+
+    const res = await publishEndpoint.handler(req as any)
+    const body = await res.json()
+
+    expect(res.status).toBe(409)
+    expect(body.error).toContain('发布结果不完整')
+    expect(getAccessToken).not.toHaveBeenCalled()
+    expect(addDraft).not.toHaveBeenCalled()
   })
 
   it('发布失败：把错误写进 publishResult.lastError 并返回 500', async () => {
