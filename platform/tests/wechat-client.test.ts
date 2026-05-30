@@ -175,6 +175,23 @@ describe('uploadContentImage', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('SSRF 防护：拒绝 IPv6 内嵌 IPv4 / NAT64 绕过（高位全 0 的嵌入式 IPv4 不得放行）', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const blocked = [
+      'http://[::127.0.0.1]/a.png', // IPv4-compatible IPv6 → 环回（归一为 [::7f00:1]）
+      'http://[::10.0.0.1]/a.png', // IPv4-compatible → 私网 10/8
+      'http://[::192.168.1.1]/a.png', // IPv4-compatible → 私网 192.168/16
+      'http://[64:ff9b::7f00:1]/a.png', // NAT64（RFC 6052）→ 内嵌 127.0.0.1（十六进制段写法）
+      'http://[64:ff9b::127.0.0.1]/a.png', // NAT64 → 内嵌 127.0.0.1（点分写法）
+      'http://[::ffff:7f00:1]/a.png', // IPv4-mapped 的十六进制段写法 → 127.0.0.1
+    ]
+    for (const url of blocked) {
+      await expect(uploadContentImage('TKN', url)).rejects.toThrow(/内网|环回|拒绝/)
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('放行合法公网域名（fc/fd 开头域名如 fcdn.* 不被 IPv6 规则误拦）', async () => {
     const fetchMock = vi
       .fn()

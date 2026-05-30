@@ -1,5 +1,6 @@
 import './force-ipv4'
 import { basename } from 'node:path'
+import { isIP } from 'node:net'
 import { explainWxError } from './errors'
 
 // 建草稿时单篇图文的结构。字段对齐微信 draft/add 接口的 article 对象。
@@ -46,9 +47,45 @@ interface WxAddDraftResponse extends WxBaseResponse {
   media_id?: string
 }
 
+// 判断一个点分 IPv4 是否落在内网/环回/链路本地/CGNAT/通配保留段。
+// 入参须已是规范点分四段（如 '127.0.0.1'）。非法/越界保守判为 true（拒绝）。
+function isBlockedIPv4(dotted: string): boolean {
+  const p = dotted.split('.').map((n) => Number(n))
+  if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true
+  const [a, b] = p
+  if (a === 0 || a === 127 || a === 10) return true // 通配 / 环回 / 私有 10/8
+  if (a === 169 && b === 254) return true // 链路本地 169.254/16（含云元数据 169.254.169.254）
+  if (a === 192 && b === 168) return true // 私有 192.168/16
+  if (a === 172 && b >= 16 && b <= 31) return true // 私有 172.16/12
+  if (a === 100 && b >= 64 && b <= 127) return true // CGNAT 100.64/10
+  return false
+}
+
+// 把一个 IPv6 字面量里"内嵌的 IPv4"还原成点分 IPv4 字符串；不含内嵌 IPv4 返回 undefined。
+// 覆盖三类嵌入式写法（URL.hostname 会把它们归一成十六进制段，故两种形式都要认）：
+//   - IPv4-mapped   ::ffff:a.b.c.d / ::ffff:7f00:1
+//   - IPv4-compatible（高位全 0）  ::a.b.c.d / ::7f00:1   ← 之前被直接放行的绕过
+//   - NAT64 64:ff9b::a.b.c.d / 64:ff9b::7f00:1（RFC 6052）
+// 做法：取末尾「两段十六进制」或「点分四段」拼成 32 位 → 还原点分 IPv4。
+function embeddedIPv4(h: string): string | undefined {
+  // 末段已是点分 IPv4（如 ::ffff:127.0.0.1、64:ff9b::10.0.0.1）。
+  const dotted = h.match(/:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
+  if (dotted) return dotted[1]
+  // 末尾两段十六进制（如 ::7f00:1、::ffff:7f00:1、64:ff9b::7f00:1）→ 拼 32 位还原点分。
+  const hex = h.match(/:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+  if (hex) {
+    const hi = parseInt(hex[1], 16)
+    const lo = parseInt(hex[2], 16)
+    if (Number.isFinite(hi) && Number.isFinite(lo)) {
+      return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`
+    }
+  }
+  return undefined
+}
+
 // 拒绝指向内网/环回/链路本地/保留地址的 host，防 SSRF（图片 URL 可由已认证作者控制）。
-// 处理 IPv6 字面量方括号、IPv4-mapped IPv6、点分 IPv4 各保留段、通配与纯数字主机名。
-// 合法图片应来自公网云对象存储(OSS/COS/R2 等公网域名)。
+// 处理 IPv6 字面量方括号、IPv4-mapped / IPv4-compatible / NAT64 内嵌 IPv4、点分 IPv4 各保留段、
+// 通配与纯数字主机名。合法图片应来自公网云对象存储(OSS/COS/R2 等公网域名)。
 // 注意：不做 DNS 解析，故无法防 DNS 重绑定（域名解析到内网 IP）——第一期可接受，已知限制。
 function isBlockedHost(hostnameRaw: string): boolean {
   let h = hostnameRaw.toLowerCase().trim()
@@ -59,33 +96,27 @@ function isBlockedHost(hostnameRaw: string): boolean {
   // 纯数字主机名（十进制整数 IP，如 2130706433）：非常规，保守拒绝。
   if (/^\d+$/.test(h)) return true
 
-  // IPv4-mapped IPv6（::ffff:127.0.0.1）→ 取末段 IPv4 继续判；其它 ::ffff: 形式保守拒绝。
-  const mapped = h.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
-  if (mapped) h = mapped[1]
-  else if (h.startsWith('::ffff:')) return true
-
   // 点分 IPv4：环回/私有/链路本地/CGNAT/通配。
   if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) {
-    const p = h.split('.').map((n) => Number(n))
-    if (p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true
-    const [a, b] = p
-    if (a === 0 || a === 127 || a === 10) return true
-    if (a === 169 && b === 254) return true
-    if (a === 192 && b === 168) return true
-    if (a === 172 && b >= 16 && b <= 31) return true
-    if (a === 100 && b >= 64 && b <= 127) return true
-    return false
+    return isBlockedIPv4(h)
   }
 
-  // IPv6 字面量（含冒号）才判 IPv6 规则——避免把 fcdn.com / fd-xx.com 等合法域名误判。
-  if (h.includes(':')) {
-    if (h === '::' || h === '::1') return true
-    const first = h.split(':')[0] // '' 表示以 :: 开头（前导零段省略），交后续按公网放行
+  // IPv6 字面量才判 IPv6 规则——用 net.isIP 确认，避免把 fcdn.com / fd-xx.com 等合法域名误判。
+  if (isIP(h) === 6) {
+    if (h === '::' || h === '::1') return true // 通配 / 环回
+    // 内嵌 IPv4（mapped / compatible / NAT64）：还原成点分后复用 IPv4 私网判定。
+    // 这堵住了高位全 0（:: 开头）的 IPv4-compatible 与 NAT64 绕过——它们曾被直接放行。
+    const v4 = embeddedIPv4(h)
+    if (v4) return isBlockedIPv4(v4)
+    // NAT64 前缀 64:ff9b::/96（即便末段未匹配出 IPv4，也保守拒绝整个 NAT64 段）。
+    if (h.startsWith('64:ff9b:')) return true
+    // 纯 IPv6：判链路本地 fe80::/10、唯一本地 fc00::/7。
+    const first = h.split(':')[0]
     if (first) {
-      const v = parseInt(first, 16)
-      if (Number.isFinite(v)) {
-        if ((v & 0xffc0) === 0xfe80) return true // fe80::/10 链路本地（覆盖 fe80–febf）
-        if ((v & 0xfe00) === 0xfc00) return true // fc00::/7 唯一本地（覆盖 fc00–fdff）
+      const vv = parseInt(first, 16)
+      if (Number.isFinite(vv)) {
+        if ((vv & 0xffc0) === 0xfe80) return true // fe80::/10 链路本地（覆盖 fe80–febf）
+        if ((vv & 0xfe00) === 0xfc00) return true // fc00::/7 唯一本地（覆盖 fc00–fdff）
       }
     }
     return false
