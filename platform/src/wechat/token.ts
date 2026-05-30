@@ -41,17 +41,18 @@ export async function getAccessToken(appId: string, secret: string): Promise<str
   url.searchParams.set('appid', appId)
   url.searchParams.set('secret', secret)
 
-  // 显式超时：token 接口无响应时不无限挂起（与三个内容接口一致，见 client.ts wxFetch）。
+  // 显式超时：token 接口无响应时不无限挂起（与三个内容接口一致，见 client.ts wxFetchJson）。
   // 30s 远小于发布锁 TTL（10min），不会因取 token 慢触发锁误判。
+  // 超时窗口须覆盖 res.json()——只覆盖 fetch() 时，「headers 来了但 body 卡住」仍会挂（codex Medium）。
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 30_000)
-  let res: Response
+  let data: WxTokenResponse
   try {
-    res = await fetch(url, { method: 'GET', signal: ctrl.signal })
+    const res = await fetch(url, { method: 'GET', signal: ctrl.signal })
+    data = (await res.json()) as WxTokenResponse
   } finally {
     clearTimeout(timer)
   }
-  const data = (await res.json()) as WxTokenResponse
 
   // 取 token 失败时 errcode 非 0（如 40013 appid 错、40125 secret 错、40164 IP 白名单）。
   if (data.errcode) {

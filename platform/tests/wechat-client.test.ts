@@ -192,6 +192,28 @@ describe('uploadContentImage', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('不误拦合法公网 IPv6（低 32 位恰好像内网 IPv4，但非 mapped/compatible/NAT64 前缀）', async () => {
+    // 回归：embeddedIPv4 不能对任意 IPv6 都抽末两段 hex——否则公网 IPv6 末尾恰为 :7f00:1
+    //（=127.0.0.1）会被误判内嵌环回而拒发。只有 ::/96、::ffff:0:0/96、64:ff9b::/96 前缀
+    // 才是真正内嵌 IPv4 的写法。
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'image/png' }),
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      } as unknown as Response)
+      .mockResolvedValueOnce(jsonResponse({ url: 'https://mmbiz.qpic.cn/ip6.jpg' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    // 2001:db8:: 文档示例段（公网可路由形态），低位 7f00:1 看起来像 127.0.0.1，但高位非全 0、
+    // 非 ::ffff:、非 64:ff9b: —— 不是内嵌 IPv4，应放行。
+    const result = await uploadContentImage('TKN', 'http://[2001:db8::7f00:1]/pic.png')
+    expect(result.url).toBe('https://mmbiz.qpic.cn/ip6.jpg')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('放行合法公网域名（fc/fd 开头域名如 fcdn.* 不被 IPv6 规则误拦）', async () => {
     const fetchMock = vi
       .fn()

@@ -61,13 +61,25 @@ function isBlockedIPv4(dotted: string): boolean {
   return false
 }
 
-// 把一个 IPv6 字面量里"内嵌的 IPv4"还原成点分 IPv4 字符串；不含内嵌 IPv4 返回 undefined。
-// 覆盖三类嵌入式写法（URL.hostname 会把它们归一成十六进制段，故两种形式都要认）：
-//   - IPv4-mapped   ::ffff:a.b.c.d / ::ffff:7f00:1
-//   - IPv4-compatible（高位全 0）  ::a.b.c.d / ::7f00:1   ← 之前被直接放行的绕过
-//   - NAT64 64:ff9b::a.b.c.d / 64:ff9b::7f00:1（RFC 6052）
-// 做法：取末尾「两段十六进制」或「点分四段」拼成 32 位 → 还原点分 IPv4。
+// 仅这三类前缀才是「内嵌 IPv4」的 IPv6 写法（其低 32 位才代表一个 IPv4 地址）：
+//   - IPv4-mapped       ::ffff:a.b.c.d        （URL 归一为 ::ffff:HHHH:HHHH）
+//   - IPv4-compatible   ::a.b.c.d（高位全 0） （URL 归一为 ::HHHH:HHHH）—— 旧绕过点
+//   - NAT64             64:ff9b::a.b.c.d      （RFC 6052，URL 归一为 64:ff9b::HHHH:HHHH）
+// 关键（codex review Medium）：必须先确认前缀属于上述之一，才把末 32 位解析成 IPv4。否则
+// 任意公网 IPv6 只要低 32 位形如内网（如 2001:db8::7f00:1 末段 = 127.0.0.1）就会被误拦。
+function hasEmbeddedIPv4Prefix(h: string): boolean {
+  // ::ffff:* 或 ::（全零高位，compatible，形如 ::X:Y 或 ::a.b.c.d，但排除 ::1 / ::）
+  if (h.startsWith('::ffff:')) return true
+  if (h.startsWith('64:ff9b:')) return true
+  // IPv4-compatible：以 :: 开头且其后还有内容（::X:Y / ::a.b.c.d）。::1、:: 已在调用前单独处理。
+  if (h.startsWith('::') && h !== '::') return true
+  return false
+}
+
+// 把符合内嵌前缀的 IPv6 字面量里的 IPv4 还原成点分字符串；不符合或无法解析返回 undefined。
+// 仅在 hasEmbeddedIPv4Prefix(h) 为真时调用才有意义。
 function embeddedIPv4(h: string): string | undefined {
+  if (!hasEmbeddedIPv4Prefix(h)) return undefined
   // 末段已是点分 IPv4（如 ::ffff:127.0.0.1、64:ff9b::10.0.0.1）。
   const dotted = h.match(/:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
   if (dotted) return dotted[1]
@@ -132,13 +144,17 @@ const FETCH_TIMEOUT_MS = 10_000
 // 不会因单次接口慢触发锁误判过期；微信侧无响应时也不会无限挂起（abort 抛错→上层释放锁、可重试）。
 const WX_API_TIMEOUT_MS = 30_000
 
-// 给微信 API 的 POST fetch 包一层显式超时（AbortController）。三个上传/草稿接口共用，避免微信
-// 无响应时请求永久挂起、长时间占住发布锁（codex review High：发布链路 fetch 须有超时且 < 锁 TTL）。
-async function wxFetch(url: URL, init: RequestInit): Promise<Response> {
+// 给微信 API 调用包一层显式超时（AbortController）。三个上传/草稿接口共用，避免微信无响应时
+// 请求永久挂起、长时间占住发布锁（codex review High：发布链路 fetch 须有超时且 < 锁 TTL）。
+// 关键（codex review Medium）：超时必须同时覆盖 res.json() —— 若只在 fetch() resolve 后即清
+// timer，微信「发回 headers 后卡住 body」时 res.json() 仍会无限挂起。故把 body 解析也纳入
+// 同一 abort 窗口：解析完再清 timer。
+async function wxFetchJson<T>(url: URL, init: RequestInit): Promise<T> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), WX_API_TIMEOUT_MS)
   try {
-    return await fetch(url, { ...init, signal: ctrl.signal })
+    const res = await fetch(url, { ...init, signal: ctrl.signal })
+    return (await res.json()) as T
   } finally {
     clearTimeout(timer)
   }
@@ -220,8 +236,7 @@ export async function uploadContentImage(token: string, file: WxFileInput): Prom
   const url = new URL('https://api.weixin.qq.com/cgi-bin/media/uploadimg')
   url.searchParams.set('access_token', token)
 
-  const res = await wxFetch(url, { method: 'POST', body: form })
-  const data = (await res.json()) as WxUploadImgResponse
+  const data = await wxFetchJson<WxUploadImgResponse>(url, { method: 'POST', body: form })
 
   if (data.errcode) {
     throw new Error(`上传正文图失败：${explainWxError(data.errcode)}（errmsg: ${data.errmsg ?? ''}）`)
@@ -251,8 +266,7 @@ export async function addPermanentImage(
   // type 走 query，固定 image。
   url.searchParams.set('type', 'image')
 
-  const res = await wxFetch(url, { method: 'POST', body: form })
-  const data = (await res.json()) as WxAddMaterialResponse
+  const data = await wxFetchJson<WxAddMaterialResponse>(url, { method: 'POST', body: form })
 
   if (data.errcode) {
     throw new Error(`上传封面永久素材失败：${explainWxError(data.errcode)}（errmsg: ${data.errmsg ?? ''}）`)
@@ -274,13 +288,12 @@ export async function addDraft(token: string, article: DraftArticle): Promise<{ 
   const url = new URL('https://api.weixin.qq.com/cgi-bin/draft/add')
   url.searchParams.set('access_token', token)
 
-  const res = await wxFetch(url, {
+  const data = await wxFetchJson<WxAddDraftResponse>(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     // 微信对中文不接受被 ASCII 转义？实际接受 UTF-8 JSON，这里正常 stringify 即可。
     body: JSON.stringify({ articles: [article] }),
   })
-  const data = (await res.json()) as WxAddDraftResponse
 
   if (data.errcode) {
     throw new Error(`新建草稿失败：${explainWxError(data.errcode)}（errmsg: ${data.errmsg ?? ''}）`)
