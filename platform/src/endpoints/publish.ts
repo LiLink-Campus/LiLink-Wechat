@@ -4,7 +4,7 @@
 //   path '/:id/publish'、method 'post' → 实际路由 POST /api/channel-contents/:id/publish。
 //
 // 逻辑：
-//   1. 鉴权：必须是已登录运营（req.user），否则 403。
+//   1. 鉴权：必须是已登录运营（req.user），否则 401（未登录=无身份）。
 //   2. 取渠道稿（req.payload.findByID）。不存在 → 404。
 //   3. 幂等（三态一致才直接回包）：仅当 stage==='draft_created' 且 wxDraftMediaId 存在
 //      且 status==='published' 三者一致时，才认为「彻底发完」，直接回包既有结果、
@@ -61,9 +61,9 @@ export const publishEndpoint = {
   handler: async (req: any): Promise<Response> => {
     const { payload, user } = req
 
-    // 1. 鉴权
+    // 1. 鉴权：未登录=无身份，用 401（与 transition/inlineHtml 一致；403 应留给"已登录但无权限"）
     if (!user) {
-      return Response.json({ error: '未登录或会话失效' }, { status: 403 })
+      return Response.json({ error: '未登录或会话失效' }, { status: 401 })
     }
 
     const id = req.routeParams?.id

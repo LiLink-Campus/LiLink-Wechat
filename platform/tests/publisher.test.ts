@@ -425,10 +425,10 @@ describe('publishEndpoint 幂等与守卫', () => {
     expect(statusWrite).toBeTruthy()
   })
 
-  it('未登录：返回 403，不查库', async () => {
+  it('未登录：返回 401，不查库', async () => {
     const req = makeReq({ doc: makeChannelContent(), user: null })
     const res = await publishEndpoint.handler(req as any)
-    expect(res.status).toBe(403)
+    expect(res.status).toBe(401)
     expect((req.payload.findByID as any)).not.toHaveBeenCalled()
   })
 
@@ -469,12 +469,15 @@ describe('publishEndpoint 幂等与守卫', () => {
     // 真正发布链路被触发。
     expect(addDraft).toHaveBeenCalledTimes(1)
 
-    // update 至少两次：一次回填 publishResult，一次（由 applyTransition 触发）写 status。
+    // 现在有两次 publishResult 写：onDraftCreated 的即时持久化（仅 wxDraftMediaId+stage，无
+    // publishedAt）+ 随后的完整回填（含 publishedAt + 清 lastError）。这里断言「完整回填」那次。
     const updateCalls = (payload.update as any).mock.calls.map((c: any[]) => c[0])
-    const resultWrite = updateCalls.find((d: any) => d?.data?.publishResult?.stage === 'draft_created')
+    const resultWrite = updateCalls.find((d: any) => d?.data?.publishResult?.publishedAt)
     expect(resultWrite).toBeTruthy()
     expect(resultWrite.data.publishResult.wxDraftMediaId).toBe('DRAFT_MID')
+    expect(resultWrite.data.publishResult.stage).toBe('draft_created')
     expect(typeof resultWrite.data.publishResult.publishedAt).toBe('string')
+    expect(resultWrite.data.publishResult.lastError).toBeNull()
 
     const statusWrite = updateCalls.find((d: any) => d?.data?.status === 'published')
     expect(statusWrite).toBeTruthy()
