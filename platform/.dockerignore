@@ -1,0 +1,34 @@
+# Docker 构建上下文忽略清单（context = platform/）
+# 目的：不把宿主机的 node_modules/.next/.env 等带进镜像，
+#       镜像内一律重新 npm ci + next build，保证可复现、体积小、不泄密。
+
+# 依赖与构建产物（镜像内重装/重建）
+node_modules
+.next
+out
+build
+coverage
+
+# 环境与密钥（运行期由 compose 的 env_file 注入，绝不打进镜像层）
+.env
+.env.*
+!.env.example
+
+# 版本控制与编辑器
+.git
+.gitignore
+.vscode
+.idea
+
+# 本地/容器配置自身（无需进镜像）
+docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# 日志与杂项
+*.log
+npm-debug.log*
+.DS_Store
+*.pem
+*.tsbuildinfo

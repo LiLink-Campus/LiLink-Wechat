@@ -1,0 +1,62 @@
+name: CI
+
+# 第一期最小 CI：类型检查 + 单测/集成测试。
+# 关键：带 postgres service 跑需 DB 的集成测试（发布并发锁原子性、collections）——
+# 否则 publish-lock 等 describe.skipIf(!DATABASE_URI) 会整体跳过，Batch2 的并发原子保证变「假绿」。
+# 不跑 next build / lint：build 在 Turbopack 下对 monorepo root 推断有坑、lint --fix 会乱改；
+# 二者价值低于其不稳定成本，第一期不纳入 CI 门禁。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: lilink_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # 指向上面的 postgres service。Payload 无 migrations 目录 → dev push 模式：
+      # 测试里 getPayload({config}) 首次会把 schema 推到这个空库（NODE_ENV 非 production）。
+      DATABASE_URI: postgres://postgres:postgres@localhost:5432/lilink_test
+      PAYLOAD_SECRET: ci-only-secret-not-for-production
+      # 不配 S3_* → ossPresignEnabled=false，media 走本地磁盘，不触碰任何真实 OSS。
+
+    defaults:
+      run:
+        working-directory: platform # 应用在仓库的 platform 子目录
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: platform/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # --no-file-parallelism：两个需 DB 的测试文件若并行各自 getPayload 会并发 push 同一空库
+      # 导致 schema 竞争；串行让第一个建好表、后续复用。CI 慢一点可接受。
+      - name: Test (incl. DB integration)
+        run: npx vitest run --no-file-parallelism
